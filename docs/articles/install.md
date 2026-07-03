@@ -51,7 +51,7 @@ then use the checkout's `zero` binary for experiments:
 ```sh
 pnpm install
 make -C native/zero-c
-zero --version
+bin/zero --version
 ```
 
 The repository contributor notes cover checkout-specific wrapper commands.
