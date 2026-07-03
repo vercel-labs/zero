@@ -1,0 +1,60 @@
+// cmd_init.0 — `0pm init [name]` — create zero.json in current directory
+
+use std.mem
+use std.fs
+use std.args
+use std.path
+use std.io
+
+use types
+use manifest
+use output
+
+pub fn runInit(world: World) -> CmdResult raises {
+    let fs: Fs = std.fs.host()
+
+    // Refuse to overwrite existing zero.json
+    let existing: Maybe<owned<File>> = std.fs.open(fs, "zero.json")
+    if existing.has {
+        var ef: owned<File> = existing.value
+        std.fs.close(&mut ef)
+        return CmdResult.err("zero.json already exists")
+    }
+
+    // Determine package name: arg[2] or cwd basename
+    var name_buf: [64]u8 = [0_u8; 64]
+    var name_len: usize = 0
+    let name_arg: Maybe<String> = std.args.get(2)
+    if name_arg.has {
+        let n: usize = std.mem.copy(name_buf, std.mem.span(name_arg.value))
+        name_len = n
+    } else {
+        let cwd: Maybe<String> = std.args.get(0)
+        if cwd.has {
+            let base: String = std.path.basename(cwd.value)
+            let n: usize = std.mem.copy(name_buf, std.mem.span(base))
+            name_len = n
+        } else {
+            let n: usize = std.mem.copy(name_buf, "my-package")
+            name_len = n
+        }
+    }
+    if name_len == 0 {
+        let n: usize = std.mem.copy(name_buf, "my-package")
+        name_len = n
+    }
+
+    // Build a minimal Manifest
+    var m: Manifest = Manifest { pkg_name:        [0_u8; 64], name_len:        0, pkg_version:     [0_u8; 32], ver_len:         0, raw_targets:     [0_u8; 512], raw_targets_len: 0, raw_deps:        [0_u8; 2048], raw_deps_len:    0, dep_count:       0 }
+    let cn: usize = std.mem.copy(m.pkg_name, name_buf[..name_len])
+    m.name_len = cn
+    let cv: usize = std.mem.copy(m.pkg_version, "0.1.0")
+    m.ver_len = cv
+
+    if !writeManifest(fs, "zero.json", &m) {
+        return CmdResult.err("failed to write zero.json")
+    }
+
+    check printLine(world, "created zero.json")
+    return CmdResult.ok
+}

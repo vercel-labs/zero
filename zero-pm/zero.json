@@ -1,0 +1,4 @@
+{
+  "package": { "name": "zero-pm", "version": "0.1.0" },
+  "targets": { "cli": { "kind": "exe", "main": "src/main.0" } }
+}

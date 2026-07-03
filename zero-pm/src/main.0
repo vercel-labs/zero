@@ -1,0 +1,62 @@
+// main.0 — 0pm entry point and sub-command dispatcher
+
+use std.args
+use std.mem
+use std.io
+
+use types
+use output
+use cmd_init
+use cmd_install
+use cmd_add
+use cmd_remove
+use cmd_list
+use cmd_info
+use cmd_update
+
+pub fn main(world: World) -> Void raises {
+    let sub_m: Maybe<String> = std.args.get(1)
+    if !sub_m.has {
+        check printUsage(world)
+        return
+    }
+    let sub: Span<u8> = std.mem.span(sub_m.value)
+
+    var result: CmdResult = CmdResult.ok
+
+    if std.mem.eql(sub, "init") {
+        result = check runInit(world)
+    } else if std.mem.eql(sub, "install") {
+        result = check runInstall(world)
+    } else if std.mem.eql(sub, "add") {
+        result = check runAdd(world)
+    } else if std.mem.eql(sub, "remove") {
+        result = check runRemove(world)
+    } else if std.mem.eql(sub, "list") {
+        result = check runList(world)
+    } else if std.mem.eql(sub, "info") {
+        result = check runInfo(world)
+    } else if std.mem.eql(sub, "update") {
+        result = check runUpdate(world)
+    } else if std.mem.eql(sub, "--help") || std.mem.eql(sub, "-h") || std.mem.eql(sub, "help") {
+        check printUsage(world)
+        return
+    } else {
+        var msg_buf: [80]u8 = [0_u8; 80]
+        var mc: usize = 0
+        let a1: Maybe<usize> = std.io.writeSpan(msg_buf, mc, "unknown command: ")
+        if a1.has { mc = a1.value }
+        let a2: Maybe<usize> = std.io.writeSpan(msg_buf, mc, sub)
+        if a2.has { mc = a2.value }
+        check printError(world, std.io.written(msg_buf, mc))
+        check printUsage(world)
+        return
+    }
+
+    match result {
+        ok {}
+        .err(msg) {
+            check printError(world, std.mem.span(msg))
+        }
+    }
+}

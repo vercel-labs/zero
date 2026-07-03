@@ -1,0 +1,502 @@
+// manifest.0 — read and write zero.json package manifests
+
+use std.mem
+use std.fs
+use std.io
+use std.json
+use std.str
+
+use types
+
+// Skip whitespace in `bytes` starting at `pos`.
+pub fn skipWsAt(bytes: Span<u8>, pos: usize) -> usize {
+    var i: usize = pos
+    let len: usize = std.mem.len(bytes)
+    while i < len {
+        let b: u8 = bytes[i]
+        if b != 32_u8 && b != 9_u8 && b != 10_u8 && b != 13_u8 {
+            return i
+        }
+        i = i + 1
+    }
+    return i
+}
+
+// Find the end of a JSON string starting at `pos` (must be `"`).
+// Returns position after closing `"`, or 0 on error.
+fn jsonStringEnd(bytes: Span<u8>, pos: usize) -> usize {
+    let len: usize = std.mem.len(bytes)
+    if pos >= len || bytes[pos] != 34_u8 {
+        return 0
+    }
+    var i: usize = pos + 1
+    while i < len {
+        if bytes[i] == 92_u8 {
+            i = i + 2
+        } else if bytes[i] == 34_u8 {
+            return i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    return 0
+}
+
+// Find the end of a JSON value starting at `pos`. Returns 0 on error.
+fn jsonValueEnd(bytes: Span<u8>, pos: usize) -> usize {
+    let len: usize = std.mem.len(bytes)
+    if pos >= len {
+        return 0
+    }
+    let b: u8 = bytes[pos]
+    if b == 34_u8 {
+        return jsonStringEnd(bytes, pos)
+    }
+    if b == 123_u8 || b == 91_u8 {
+        // object or array — find matching close bracket
+        var close: u8 = 125_u8
+        if b != 123_u8 { close = 93_u8 }
+        var depth: i32 = 1
+        var i: usize = pos + 1
+        while i < len && depth > 0 {
+            if bytes[i] == 34_u8 {
+                let end: usize = jsonStringEnd(bytes, i)
+                if end == 0 {
+                    return 0
+                }
+                i = end
+            } else if bytes[i] == b || bytes[i] == 91_u8 || bytes[i] == 123_u8 {
+                depth = depth + 1
+                i = i + 1
+            } else if bytes[i] == close || bytes[i] == 93_u8 || bytes[i] == 125_u8 {
+                depth = depth - 1
+                i = i + 1
+            } else {
+                i = i + 1
+            }
+        }
+        return i
+    }
+    // number, bool, null — scan until delimiter
+    var i: usize = pos
+    while i < len {
+        let c: u8 = bytes[i]
+        if c == 32_u8 || c == 9_u8 || c == 10_u8 || c == 13_u8 || c == 44_u8 || c == 125_u8 || c == 93_u8 {
+            return i
+        }
+        i = i + 1
+    }
+    return i
+}
+
+// Decode a JSON string value (including quotes) into `buf`. Returns span or null.
+pub fn decodeStr(buf: MutSpan<u8>, raw: Span<u8>) -> Maybe<Span<u8>> {
+    let rlen: usize = std.mem.len(raw)
+    if rlen < 2 || raw[0] != 34_u8 || raw[rlen - 1] != 34_u8 {
+        return null
+    }
+    // simple copy without escape processing for now (ASCII paths and names)
+    let inner: Span<u8> = raw[1..rlen - 1]
+    let copied: usize = std.mem.copy(buf, inner)
+    return std.io.written(buf, copied)
+}
+
+// Iterate the next key-value pair in a JSON object starting at `pos` (past `{`).
+// On success, fills `key_buf` and `out` fields and returns the new cursor position.
+// Returns 0 when there are no more entries or on error.
+pub fn nextEntry(bytes: Span<u8>, pos: usize, key_buf: MutSpan<u8>, out: mutref<EntryOut>) -> usize {
+    let len: usize = std.mem.len(bytes)
+    var i: usize = skipWsAt(bytes, pos)
+    if i >= len || bytes[i] == 125_u8 {
+        return 0
+    }
+    if bytes[i] == 44_u8 {
+        i = skipWsAt(bytes, i + 1)
+    }
+    if i >= len || bytes[i] == 125_u8 {
+        return 0
+    }
+    if bytes[i] != 34_u8 {
+        return 0
+    }
+    let key_end: usize = jsonStringEnd(bytes, i)
+    if key_end == 0 {
+        return 0
+    }
+    let raw_key: Span<u8> = bytes[i..key_end]
+    let decoded: Maybe<Span<u8>> = decodeStr(key_buf, raw_key)
+    if decoded.has {
+        out.key_len = std.mem.len(decoded.value)
+    } else {
+        out.key_len = 0
+    }
+    i = skipWsAt(bytes, key_end)
+    if i >= len || bytes[i] != 58_u8 {
+        return 0
+    }
+    i = skipWsAt(bytes, i + 1)
+    out.val_start = i
+    let vend: usize = jsonValueEnd(bytes, i)
+    if vend == 0 {
+        return 0
+    }
+    out.val_end = vend
+    return vend
+}
+
+// Count entries in a JSON object span (must start with `{`).
+pub fn countObjEntries(obj: Span<u8>) -> usize {
+    let len: usize = std.mem.len(obj)
+    if len < 2 || obj[0] != 123_u8 {
+        return 0
+    }
+    var count: usize = 0
+    var i: usize = skipWsAt(obj, 1)
+    while i < len && obj[i] != 125_u8 {
+        if obj[i] == 44_u8 {
+            i = skipWsAt(obj, i + 1)
+        }
+        if i >= len || obj[i] == 125_u8 {
+            return count
+        }
+        if obj[i] != 34_u8 {
+            return count
+        }
+        let kend: usize = jsonStringEnd(obj, i)
+        if kend == 0 {
+            return count
+        }
+        i = skipWsAt(obj, kend)
+        if i >= len || obj[i] != 58_u8 {
+            return count
+        }
+        i = skipWsAt(obj, i + 1)
+        let vend: usize = jsonValueEnd(obj, i)
+        if vend == 0 {
+            return count
+        }
+        count = count + 1
+        i = skipWsAt(obj, vend)
+    }
+    return count
+}
+
+// Read zero.json from `path` into `m`. Returns true on success.
+pub fn readManifest(fs: Fs, path: String, m: mutref<Manifest>) -> Bool {
+    var read_buf: [8192]u8 = [0_u8; 8192]
+    let n_m: Maybe<usize> = std.fs.readFile(fs, path, read_buf)
+    if !n_m.has {
+        return false
+    }
+    let bytes: Span<u8> = read_buf[..n_m.value]
+
+    // Extract "package" object
+    let pkg_m: Maybe<Span<u8>> = std.json.field(bytes, "package")
+    if !pkg_m.has {
+        return false
+    }
+
+    // name
+    var name_dec: [64]u8 = [0_u8; 64]
+    let name_raw: Maybe<Span<u8>> = std.json.field(pkg_m.value, "name")
+    if name_raw.has {
+        let name_d: Maybe<Span<u8>> = decodeStr(name_dec, name_raw.value)
+        if name_d.has {
+            let n: usize = std.mem.copy(m.pkg_name, name_d.value)
+            m.name_len = n
+        }
+    }
+
+    // version
+    var ver_dec: [32]u8 = [0_u8; 32]
+    let ver_raw: Maybe<Span<u8>> = std.json.field(pkg_m.value, "version")
+    if ver_raw.has {
+        let ver_d: Maybe<Span<u8>> = decodeStr(ver_dec, ver_raw.value)
+        if ver_d.has {
+            let n: usize = std.mem.copy(m.pkg_version, ver_d.value)
+            m.ver_len = n
+        }
+    }
+
+    // targets — store raw JSON
+    let tgt_m: Maybe<Span<u8>> = std.json.field(bytes, "targets")
+    if tgt_m.has {
+        let n: usize = std.mem.copy(m.raw_targets, tgt_m.value)
+        m.raw_targets_len = n
+    }
+
+    // dependencies — store raw JSON object and count entries
+    let deps_m: Maybe<Span<u8>> = std.json.field(bytes, "dependencies")
+    if deps_m.has {
+        let n: usize = std.mem.copy(m.raw_deps, deps_m.value)
+        m.raw_deps_len = n
+        m.dep_count = countObjEntries(deps_m.value)
+    }
+
+    return true
+}
+
+// Retrieve the dep at `index` from the manifest's raw_deps JSON. Returns true on success.
+pub fn getDep(m: ref<Manifest>, index: usize, out: mutref<DepEntry>) -> Bool {
+    if index >= m.dep_count {
+        return false
+    }
+    let deps_json: Span<u8> = m.raw_deps[..m.raw_deps_len]
+    let len: usize = std.mem.len(deps_json)
+    if len < 2 || deps_json[0] != 123_u8 {
+        return false
+    }
+    var cur: usize = skipWsAt(deps_json, 1)
+    var found: usize = 0
+    var key_buf: [64]u8 = [0_u8; 64]
+    while cur < len && deps_json[cur] != 125_u8 {
+        if deps_json[cur] == 44_u8 {
+            cur = skipWsAt(deps_json, cur + 1)
+        }
+        if cur >= len || deps_json[cur] == 125_u8 {
+            return false
+        }
+        var eo: EntryOut = EntryOut { key_len: 0, val_start: 0, val_end: 0 }
+        let next: usize = nextEntry(deps_json, cur, key_buf, &mut eo)
+        if next == 0 {
+            return false
+        }
+        if found == index {
+            let n: usize = std.mem.copy(out.name, key_buf[..eo.key_len])
+            out.name_len = n
+            let val: Span<u8> = deps_json[eo.val_start..eo.val_end]
+            // determine if local (object) or remote (string)
+            if std.mem.len(val) > 0 && val[0] == 123_u8 {
+                out.is_local = true
+                var dec: [128]u8 = [0_u8; 128]
+                let path_raw: Maybe<Span<u8>> = std.json.field(val, "path")
+                if path_raw.has {
+                    let path_d: Maybe<Span<u8>> = decodeStr(dec, path_raw.value)
+                    if path_d.has {
+                        let pn: usize = std.mem.copy(out.path, path_d.value)
+                        out.path_len = pn
+                    }
+                }
+                var vbuf: [32]u8 = [0_u8; 32]
+                let vraw: Maybe<Span<u8>> = std.json.field(val, "version")
+                if vraw.has {
+                    let vd: Maybe<Span<u8>> = decodeStr(vbuf, vraw.value)
+                    if vd.has {
+                        let vn: usize = std.mem.copy(out.version, vd.value)
+                        out.ver_len = vn
+                    }
+                }
+            } else {
+                out.is_local = false
+                var vbuf2: [32]u8 = [0_u8; 32]
+                let vd: Maybe<Span<u8>> = decodeStr(vbuf2, val)
+                if vd.has {
+                    let vn: usize = std.mem.copy(out.version, vd.value)
+                    out.ver_len = vn
+                }
+            }
+            return true
+        }
+        found = found + 1
+        cur = skipWsAt(deps_json, eo.val_end)
+    }
+    return false
+}
+
+// Check if a dep with `name` exists in the manifest. Returns index or m.dep_count if not found.
+pub fn findDep(m: ref<Manifest>, name: Span<u8>) -> usize {
+    var i: usize = 0
+    while i < m.dep_count {
+        var entry: DepEntry = DepEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, path: [0_u8; 128], path_len: 0, is_local: false }
+        if getDep(m, i, &mut entry) {
+            if std.mem.eql(entry.name[..entry.name_len], name) {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return m.dep_count
+}
+
+// Append a dep JSON fragment to the raw_deps buffer. Returns true on success.
+// Rebuilds the raw_deps JSON from scratch by appending the new entry.
+pub fn addDep(m: mutref<Manifest>, entry: ref<DepEntry>) -> Bool {
+    // Build new entry fragment
+    var frag: [512]u8 = [0_u8; 512]
+    var fc: usize = 0
+
+    // name key
+    let c1: Maybe<usize> = std.io.writeSpan(frag, fc, "\"")
+    if c1.has { fc = c1.value }
+    let nm: Span<u8> = entry.name[..entry.name_len]
+    let c2: Maybe<usize> = std.io.writeSpan(frag, fc, nm)
+    if c2.has { fc = c2.value }
+    let c3: Maybe<usize> = std.io.writeSpan(frag, fc, "\": ")
+    if c3.has { fc = c3.value }
+
+    if entry.is_local {
+        let c4: Maybe<usize> = std.io.writeSpan(frag, fc, "{\"path\": \"")
+        if c4.has { fc = c4.value }
+        let c5: Maybe<usize> = std.io.writeSpan(frag, fc, entry.path[..entry.path_len])
+        if c5.has { fc = c5.value }
+        let c6: Maybe<usize> = std.io.writeSpan(frag, fc, "\", \"version\": \"")
+        if c6.has { fc = c6.value }
+        let c7: Maybe<usize> = std.io.writeSpan(frag, fc, entry.version[..entry.ver_len])
+        if c7.has { fc = c7.value }
+        let c8: Maybe<usize> = std.io.writeSpan(frag, fc, "\"}")
+        if c8.has { fc = c8.value }
+    } else {
+        let c4: Maybe<usize> = std.io.writeSpan(frag, fc, "\"")
+        if c4.has { fc = c4.value }
+        let c5: Maybe<usize> = std.io.writeSpan(frag, fc, entry.version[..entry.ver_len])
+        if c5.has { fc = c5.value }
+        let c6: Maybe<usize> = std.io.writeSpan(frag, fc, "\"")
+        if c6.has { fc = c6.value }
+    }
+
+    // Rebuild raw_deps: insert into existing JSON object
+    var new_deps: [2048]u8 = [0_u8; 2048]
+    var nc: usize = 0
+    var old_buf: [2048]u8 = [0_u8; 2048]
+    let old_len: usize = std.mem.copy(old_buf, m.raw_deps[..m.raw_deps_len])
+    if old_len < 2 {
+        // empty: start fresh
+        let x1: Maybe<usize> = std.io.writeSpan(new_deps, nc, "{")
+        if x1.has { nc = x1.value }
+        let x2: Maybe<usize> = std.io.writeSpan(new_deps, nc, std.io.written(frag, fc))
+        if x2.has { nc = x2.value }
+        let x3: Maybe<usize> = std.io.writeSpan(new_deps, nc, "}")
+        if x3.has { nc = x3.value }
+    } else {
+        // insert before closing `}`
+        let x1: Maybe<usize> = std.io.writeSpan(new_deps, nc, old_buf[..old_len - 1])
+        if x1.has { nc = x1.value }
+        if m.dep_count > 0 {
+            let x2: Maybe<usize> = std.io.writeSpan(new_deps, nc, ", ")
+            if x2.has { nc = x2.value }
+        }
+        let x3: Maybe<usize> = std.io.writeSpan(new_deps, nc, std.io.written(frag, fc))
+        if x3.has { nc = x3.value }
+        let x4: Maybe<usize> = std.io.writeSpan(new_deps, nc, "}")
+        if x4.has { nc = x4.value }
+    }
+    let copied: usize = std.mem.copy(m.raw_deps, new_deps[..nc])
+    m.raw_deps_len = copied
+    m.dep_count = m.dep_count + 1
+    return true
+}
+
+// Remove the dep at `name` from raw_deps. Returns true if found and removed.
+pub fn removeDep(m: mutref<Manifest>, name: Span<u8>) -> Bool {
+    if m.dep_count == 0 {
+        return false
+    }
+    // Rebuild deps JSON omitting the matching entry
+    var new_deps: [2048]u8 = [0_u8; 2048]
+    var nc: usize = 0
+    var removed: Bool = false
+    var first: Bool = true
+
+    let c1: Maybe<usize> = std.io.writeSpan(new_deps, nc, "{")
+    if c1.has { nc = c1.value }
+
+    var i: usize = 0
+    while i < m.dep_count {
+        var entry: DepEntry = DepEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, path: [0_u8; 128], path_len: 0, is_local: false }
+        if getDep(m, i, &mut entry) {
+            let ename: Span<u8> = entry.name[..entry.name_len]
+            if std.mem.eql(ename, name) {
+                removed = true
+            } else {
+                if !first {
+                    let cx: Maybe<usize> = std.io.writeSpan(new_deps, nc, ", ")
+                    if cx.has { nc = cx.value }
+                }
+                first = false
+                // re-serialize this entry
+                let cx1: Maybe<usize> = std.io.writeSpan(new_deps, nc, "\"")
+                if cx1.has { nc = cx1.value }
+                let cx2: Maybe<usize> = std.io.writeSpan(new_deps, nc, ename)
+                if cx2.has { nc = cx2.value }
+                let cx3: Maybe<usize> = std.io.writeSpan(new_deps, nc, "\": ")
+                if cx3.has { nc = cx3.value }
+                if entry.is_local {
+                    let cx4: Maybe<usize> = std.io.writeSpan(new_deps, nc, "{\"path\": \"")
+                    if cx4.has { nc = cx4.value }
+                    let cx5: Maybe<usize> = std.io.writeSpan(new_deps, nc, entry.path[..entry.path_len])
+                    if cx5.has { nc = cx5.value }
+                    let cx6: Maybe<usize> = std.io.writeSpan(new_deps, nc, "\", \"version\": \"")
+                    if cx6.has { nc = cx6.value }
+                    let cx7: Maybe<usize> = std.io.writeSpan(new_deps, nc, entry.version[..entry.ver_len])
+                    if cx7.has { nc = cx7.value }
+                    let cx8: Maybe<usize> = std.io.writeSpan(new_deps, nc, "\"}")
+                    if cx8.has { nc = cx8.value }
+                } else {
+                    let cx4: Maybe<usize> = std.io.writeSpan(new_deps, nc, "\"")
+                    if cx4.has { nc = cx4.value }
+                    let cx5: Maybe<usize> = std.io.writeSpan(new_deps, nc, entry.version[..entry.ver_len])
+                    if cx5.has { nc = cx5.value }
+                    let cx6: Maybe<usize> = std.io.writeSpan(new_deps, nc, "\"")
+                    if cx6.has { nc = cx6.value }
+                }
+            }
+        }
+        i = i + 1
+    }
+    let cx: Maybe<usize> = std.io.writeSpan(new_deps, nc, "}")
+    if cx.has { nc = cx.value }
+
+    if removed {
+        let copied: usize = std.mem.copy(m.raw_deps, new_deps[..nc])
+        m.raw_deps_len = copied
+        m.dep_count = m.dep_count - 1
+    }
+    return removed
+}
+
+// Serialize manifest to JSON in `buf`. Returns written span or null.
+fn serializeManifest(m: ref<Manifest>, buf: MutSpan<u8>) -> Maybe<Span<u8>> {
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(buf, cursor, "{\n  \"package\": {\"name\": \"")
+    if !c1.has { return null }
+    cursor = c1.value
+
+    let c2: Maybe<usize> = std.io.writeSpan(buf, cursor, m.pkg_name[..m.name_len])
+    if c2.has { cursor = c2.value }
+    let c3: Maybe<usize> = std.io.writeSpan(buf, cursor, "\", \"version\": \"")
+    if c3.has { cursor = c3.value }
+    let c4: Maybe<usize> = std.io.writeSpan(buf, cursor, m.pkg_version[..m.ver_len])
+    if c4.has { cursor = c4.value }
+    let c5: Maybe<usize> = std.io.writeSpan(buf, cursor, "\"},\n  \"targets\": ")
+    if c5.has { cursor = c5.value }
+
+    if m.raw_targets_len > 0 {
+        let c6: Maybe<usize> = std.io.writeSpan(buf, cursor, m.raw_targets[..m.raw_targets_len])
+        if c6.has { cursor = c6.value }
+    } else {
+        let c6: Maybe<usize> = std.io.writeSpan(buf, cursor, "{\"cli\": {\"kind\": \"exe\", \"main\": \"src/main.0\"}}")
+        if c6.has { cursor = c6.value }
+    }
+
+    if m.raw_deps_len > 0 {
+        let c7: Maybe<usize> = std.io.writeSpan(buf, cursor, ",\n  \"dependencies\": ")
+        if c7.has { cursor = c7.value }
+        let c8: Maybe<usize> = std.io.writeSpan(buf, cursor, m.raw_deps[..m.raw_deps_len])
+        if c8.has { cursor = c8.value }
+    }
+
+    let c9: Maybe<usize> = std.io.writeSpan(buf, cursor, "\n}\n")
+    if c9.has { cursor = c9.value }
+
+    return std.io.written(buf, cursor)
+}
+
+// Write manifest to `path`. Returns true on success.
+pub fn writeManifest(fs: Fs, path: String, m: ref<Manifest>) -> Bool {
+    var out_buf: [4096]u8 = [0_u8; 4096]
+    let written: Maybe<Span<u8>> = serializeManifest(m, out_buf)
+    if !written.has {
+        return false
+    }
+    return std.fs.writeFile(fs, path, written.value)
+}

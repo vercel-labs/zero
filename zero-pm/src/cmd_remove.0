@@ -1,0 +1,56 @@
+// cmd_remove.0 — `0pm remove <name>` — remove a dependency
+
+use std.mem
+use std.fs
+use std.args
+use std.io
+
+use types
+use manifest
+use lockfile
+use output
+
+pub fn runRemove(world: World) -> CmdResult raises {
+    let fs: Fs = std.fs.host()
+
+    let name_arg: Maybe<String> = std.args.get(2)
+    if !name_arg.has {
+        return CmdResult.err("usage: 0pm remove <name>")
+    }
+    let name_span: Span<u8> = std.mem.span(name_arg.value)
+
+    var m: Manifest = Manifest { pkg_name:        [0_u8; 64], name_len:        0, pkg_version:     [0_u8; 32], ver_len:         0, raw_targets:     [0_u8; 512], raw_targets_len: 0, raw_deps:        [0_u8; 2048], raw_deps_len:    0, dep_count:       0 }
+    if !readManifest(fs, "zero.json", &mut m) {
+        return CmdResult.err("zero.json not found")
+    }
+
+    let idx: usize = findDep(&m, name_span)
+    if idx == m.dep_count {
+        return CmdResult.err("package not found in dependencies")
+    }
+
+    if !removeDep(&mut m, name_span) {
+        return CmdResult.err("failed to remove dependency")
+    }
+
+    if !writeManifest(fs, "zero.json", &m) {
+        return CmdResult.err("failed to write zero.json")
+    }
+
+    // Remove from lockfile if present
+    var lk: Lockfile = Lockfile { schema_version: 1_u32, raw_pkgs:       [0_u8; 4096], raw_len:        0, count:          0 }
+    if readLockfile(fs, ".zero/zero.lock.json", &mut lk) {
+        if removeEntry(&mut lk, name_span) {
+            writeLockfile(fs, ".zero/zero.lock.json", &lk)
+        }
+    }
+
+    var msg_buf: [80]u8 = [0_u8; 80]
+    var mc: usize = 0
+    let m1: Maybe<usize> = std.io.writeSpan(msg_buf, mc, "removed ")
+    if m1.has { mc = m1.value }
+    let m2: Maybe<usize> = std.io.writeSpan(msg_buf, mc, name_span)
+    if m2.has { mc = m2.value }
+    check printLine(world, std.io.written(msg_buf, mc))
+    return CmdResult.ok
+}

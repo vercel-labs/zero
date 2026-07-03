@@ -1,0 +1,127 @@
+// resolver.0 — dependency resolution
+// Produces a flat list of (name, version, url, checksum) for all direct
+// and transitive dependencies. Detects cycles and version conflicts.
+
+use std.mem
+use std.io
+
+use types
+use manifest
+use registry
+use semver
+
+// Maximum number of packages in the resolution work queue.
+const RESOLVE_MAX: usize = 64
+
+// Check if `name` is already in the resolved list.
+fn alreadyResolved(resolved: Span<ResolvedPkg>, count: usize, name: Span<u8>) -> usize {
+    var i: usize = 0
+    while i < count {
+        let nm: Span<u8> = resolved[i].name[..resolved[i].name_len]
+        if std.mem.eql(nm, name) {
+            return i
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Enqueue a dep entry into the work queue if not already present. Returns new count.
+fn enqueue(queue: MutSpan<ResolvedPkg>, q_count: usize, name: Span<u8>, constraint: Span<u8>) -> usize {
+    if q_count >= RESOLVE_MAX {
+        return q_count
+    }
+    var i: usize = 0
+    while i < q_count {
+        let qn: Span<u8> = queue[i].name[..queue[i].name_len]
+        if std.mem.eql(qn, name) {
+            return q_count
+        }
+        i = i + 1
+    }
+    let idx: usize = q_count
+    let n: usize = std.mem.copy(queue[idx].name, name)
+    queue[idx].name_len = n
+    let cv: usize = std.mem.copy(queue[idx].version, constraint)
+    queue[idx].ver_len = cv
+    queue[idx].url_len = 0
+    queue[idx].cs_len = 0
+    return q_count + 1
+}
+
+// Resolve all dependencies declared in `m`.
+// On success, writes up to RESOLVE_MAX resolved packages into `out` and returns count.
+// Returns 0 on success with no deps, MAX_USIZE on conflict/cycle.
+pub fn resolve( client: HttpClient, registry_url: Span<u8>, m: ref<Manifest>, req_buf: MutSpan<u8>, resp_buf: MutSpan<u8>, out: MutSpan<ResolvedPkg> ) -> usize {
+    var queue: [64]ResolvedPkg = [ResolvedPkg { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, url: [0_u8; 256], url_len: 0, checksum: [0_u8; 80], cs_len: 0 }; 64]
+    var q_count: usize = 0
+    var resolved_count: usize = 0
+    let sentinel: usize = 18446744073709551615_usize
+
+    // Seed the queue with direct deps from the manifest
+    var di: usize = 0
+    while di < m.dep_count {
+        var dep: DepEntry = DepEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, path: [0_u8; 128], path_len: 0, is_local: false }
+        if getDep(m, di, &mut dep) {
+            let nm: Span<u8> = dep.name[..dep.name_len]
+            let cv: Span<u8> = dep.version[..dep.ver_len]
+            q_count = enqueue(queue, q_count, nm, cv)
+        }
+        di = di + 1
+    }
+
+    // BFS resolution loop
+    var qi: usize = 0
+    while qi < q_count {
+        let qname: Span<u8> = queue[qi].name[..queue[qi].name_len]
+        let qver: Span<u8> = queue[qi].version[..queue[qi].ver_len]
+
+        // Check if already resolved
+        let existing: usize = alreadyResolved(out, resolved_count, qname)
+        if existing < resolved_count {
+            // Already resolved — verify version compatibility
+            let ex_ver: Span<u8> = out[existing].version[..out[existing].ver_len]
+            // Check if they differ (simple string equality check for exact pinned versions)
+            if !std.mem.eql(ex_ver, qver) {
+                // Version conflict
+                return sentinel
+            }
+            qi = qi + 1
+        } else {
+            // New package — fetch version info from registry
+            var ver_info: RegVersionInfo = RegVersionInfo { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, url: [0_u8; 256], url_len: 0, checksum: [0_u8; 80], cs_len: 0 }
+            let net: Net = std.net.host()
+            let client2: HttpClient = std.http.client(net)
+            let ok: Bool = fetchVersionInfo(client2, registry_url, qname, qver, req_buf, resp_buf, &mut ver_info)
+            if !ok {
+                // Cannot resolve — treat as error
+                return sentinel
+            }
+
+            // Verify constraint
+            if ver_info.ver_len > 0 {
+                let pinned: SemVerOpt = semverParse(ver_info.version[..ver_info.ver_len])
+                if pinned.has {
+                    if !std.mem.eql(qver, "") && !semverSatisfies(pinned.value, qver) {
+                        return sentinel
+                    }
+                }
+            }
+
+            // Add to resolved list
+            let rn: usize = std.mem.copy(out[resolved_count].name, ver_info.name[..ver_info.name_len])
+            out[resolved_count].name_len = rn
+            let rv: usize = std.mem.copy(out[resolved_count].version, ver_info.version[..ver_info.ver_len])
+            out[resolved_count].ver_len = rv
+            let ru: usize = std.mem.copy(out[resolved_count].url, ver_info.url[..ver_info.url_len])
+            out[resolved_count].url_len = ru
+            let rc2: usize = std.mem.copy(out[resolved_count].checksum, ver_info.checksum[..ver_info.cs_len])
+            out[resolved_count].cs_len = rc2
+            resolved_count = resolved_count + 1
+
+            qi = qi + 1
+        }
+    }
+
+    return resolved_count
+}

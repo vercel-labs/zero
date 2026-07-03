@@ -1,0 +1,174 @@
+// cmd_add.0 — `0pm add <name>[@version]` — add a dependency and install
+
+use std.mem
+use std.str
+use std.fs
+use std.args
+use std.net
+use std.http
+use std.time
+use std.env
+use std.io
+
+use types
+use manifest
+use lockfile
+use semver
+use registry
+use resolver
+use installer
+use output
+
+fn splitNameVersion(arg: Span<u8>, name_out: MutSpan<u8>, ver_out: MutSpan<u8>) -> Bool {
+    let alen: usize = std.mem.len(arg)
+    var at: usize = alen  // position of '@', or alen if absent
+    var i: usize = 0
+    while i < alen {
+        if arg[i] == 64_u8 {  // '@'
+            at = i
+            i = alen  // break
+        } else {
+            i = i + 1
+        }
+    }
+    if at == 0 { return false }  // name is empty
+    let nc: usize = std.mem.copy(name_out, arg[..at])
+    if nc == 0 { return false }
+    if at < alen {
+        let vc: usize = std.mem.copy(ver_out, arg[at + 1..alen])
+        if vc == 0 { return false }
+    }
+    return true
+}
+
+pub fn runAdd(world: World) -> CmdResult raises {
+    let fs: Fs = std.fs.host()
+
+    let pkg_arg: Maybe<String> = std.args.get(2)
+    if !pkg_arg.has {
+        return CmdResult.err("usage: 0pm add <name>[@version]")
+    }
+
+    var name_buf: [64]u8  = [0_u8; 64]
+    var ver_buf:  [32]u8  = [0_u8; 32]
+    let arg_span: Span<u8> = std.mem.span(pkg_arg.value)
+    if !splitNameVersion(arg_span, name_buf, ver_buf) {
+        return CmdResult.err("invalid package argument")
+    }
+
+    var m: Manifest = Manifest { pkg_name:        [0_u8; 64], name_len:        0, pkg_version:     [0_u8; 32], ver_len:         0, raw_targets:     [0_u8; 512], raw_targets_len: 0, raw_deps:        [0_u8; 2048], raw_deps_len:    0, dep_count:       0 }
+    if !readManifest(fs, "zero.json", &mut m) {
+        return CmdResult.err("zero.json not found — run `0pm init` first")
+    }
+
+    var registry_buf: [128]u8 = [0_u8; 128]
+    let reg_env: Maybe<String> = std.env.get("ZERO_REGISTRY")
+    var registry_url: Span<u8> = "https://registry.zerolang.ai"
+    if reg_env.has {
+        let rn: usize = std.mem.copy(registry_buf, std.mem.span(reg_env.value))
+        registry_url = registry_buf[..rn]
+    }
+
+    let client: HttpClient = std.http.client(std.net.host())
+    var req_buf:  [512]u8  = [0_u8; 512]
+    var resp_buf: [8192]u8 = [0_u8; 8192]
+
+    // Resolve version: if not specified, fetch latest from registry
+    var resolved_ver: [32]u8 = [0_u8; 32]
+    var resolved_ver_len: usize = 0
+    let ver_given_len: usize = std.mem.len(ver_buf[..32])
+    var ver_len_actual: usize = 0
+    var vi: usize = 0
+    while vi < 32 {
+        if ver_buf[vi] == 0_u8 {
+            vi = 32  // break
+        } else {
+            ver_len_actual = ver_len_actual + 1
+            vi = vi + 1
+        }
+    }
+
+    if ver_len_actual > 0 {
+        let vc: usize = std.mem.copy(resolved_ver, ver_buf[..ver_len_actual])
+        resolved_ver_len = vc
+    } else {
+        // Fetch latest version from registry
+        var info: RegPackageInfo = RegPackageInfo { name: [0_u8; 64], name_len: 0, latest: [0_u8; 32], latest_len: 0, desc: [0_u8; 256], desc_len: 0 }
+        let name_len_actual: usize = nameLen(name_buf)
+        if !fetchPackageInfo(client, registry_url, name_buf[..name_len_actual], req_buf, resp_buf, &mut info) {
+            return CmdResult.err("package not found in registry")
+        }
+        let vc: usize = std.mem.copy(resolved_ver, info.latest[..info.latest_len])
+        resolved_ver_len = vc
+    }
+
+    // Add/update dep in manifest
+    var dep: DepEntry = DepEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, path: [0_u8; 128], path_len: 0, is_local: false }
+    let name_len_actual2: usize = nameLen(name_buf)
+    let dnc: usize = std.mem.copy(dep.name, name_buf[..name_len_actual2])
+    dep.name_len = dnc
+    let dvc: usize = std.mem.copy(dep.version, resolved_ver[..resolved_ver_len])
+    dep.ver_len = dvc
+
+    if !addDep(&mut m, &dep) {
+        return CmdResult.err("failed to add dependency (manifest full?)")
+    }
+
+    if !writeManifest(fs, "zero.json", &m) {
+        return CmdResult.err("failed to write zero.json")
+    }
+
+    // Re-run install
+    var resolved: [64]ResolvedPkg = [ResolvedPkg { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, url: [0_u8; 256], url_len: 0, checksum: [0_u8; 80], cs_len: 0 }; 64]
+    let count: usize = resolve(client, registry_url, &m, req_buf, resp_buf, resolved)
+    let sentinel: usize = 18446744073709551615_usize
+    if count == sentinel {
+        return CmdResult.err("dependency resolution failed")
+    }
+
+    var dl_buf: [65536]u8 = [0_u8; 65536]
+    var k: usize = 0
+    while k < count {
+        let p: ResolvedPkg = resolved[k]
+        install(client, p.name[..p.name_len], p.version[..p.ver_len], p.url[..p.url_len], p.checksum[..p.cs_len], req_buf, dl_buf)
+        k = k + 1
+    }
+
+    // Write updated lockfile
+    var lk: Lockfile = Lockfile { schema_version: 1_u32, raw_pkgs:       [0_u8; 4096], raw_len:        0, count:          0 }
+    var l: usize = 0
+    while l < count {
+        let p: ResolvedPkg = resolved[l]
+        var entry: LockEntry = LockEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, url: [0_u8; 256], url_len: 0, checksum: [0_u8; 80], cs_len: 0 }
+        let nc2: usize = std.mem.copy(entry.name, p.name[..p.name_len])
+        entry.name_len = nc2
+        let vc2: usize = std.mem.copy(entry.version, p.version[..p.ver_len])
+        entry.ver_len = vc2
+        let uc2: usize = std.mem.copy(entry.url, p.url[..p.url_len])
+        entry.url_len = uc2
+        let cc2: usize = std.mem.copy(entry.checksum, p.checksum[..p.cs_len])
+        entry.cs_len = cc2
+        setEntry(&mut lk, &entry)
+        l = l + 1
+    }
+    writeLockfile(fs, ".zero/zero.lock.json", &lk)
+
+    var msg_buf: [96]u8 = [0_u8; 96]
+    var mc: usize = 0
+    let m1: Maybe<usize> = std.io.writeSpan(msg_buf, mc, "added ")
+    if m1.has { mc = m1.value }
+    let name_len_actual3: usize = nameLen(name_buf)
+    let m2: Maybe<usize> = std.io.writeSpan(msg_buf, mc, name_buf[..name_len_actual3])
+    if m2.has { mc = m2.value }
+    check printLine(world, std.io.written(msg_buf, mc))
+    return CmdResult.ok
+}
+
+fn nameLen(buf: [64]u8) -> usize {
+    var i: usize = 0
+    while i < 64 {
+        if buf[i] == 0_u8 { return i }
+        i = i + 1
+    }
+    return 64
+}

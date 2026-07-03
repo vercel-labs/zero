@@ -1,0 +1,156 @@
+// registry.0 — HTTP registry client
+// Registry API:
+//   GET /v1/packages/<name>         → RegPackageInfo JSON
+//   GET /v1/packages/<name>/<ver>   → RegVersionInfo JSON
+
+use std.mem
+use std.str
+use std.http
+use std.net
+use std.time
+use std.json
+use std.io
+
+use types
+use manifest
+
+// Build the HTTP GET request for a registry path into `req_buf`.
+// Returns the request span or null.
+fn buildGetRequest(req_buf: MutSpan<u8>, registry_url: Span<u8>, api_path: Span<u8>) -> Maybe<Span<u8>> {
+    var line_buf: [384]u8 = [0_u8; 384]
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(line_buf, cursor, "GET ")
+    if c1.has { cursor = c1.value }
+    let c2: Maybe<usize> = std.io.writeSpan(line_buf, cursor, registry_url)
+    if c2.has { cursor = c2.value }
+    let c3: Maybe<usize> = std.io.writeSpan(line_buf, cursor, api_path)
+    if c3.has { cursor = c3.value }
+    let start_line: Span<u8> = std.io.written(line_buf, cursor)
+    return std.http.writeRequest(req_buf, start_line, "")
+}
+
+// Fetch package metadata from the registry.
+// Returns true on success, populates `out`.
+pub fn fetchPackageInfo( client: HttpClient, registry_url: Span<u8>, name: Span<u8>, req_buf: MutSpan<u8>, resp_buf: MutSpan<u8>, out: mutref<RegPackageInfo> ) -> Bool {
+    var path_buf: [128]u8 = [0_u8; 128]
+    var pc: usize = 0
+    let p1: Maybe<usize> = std.io.writeSpan(path_buf, pc, "/v1/packages/")
+    if p1.has { pc = p1.value }
+    let p2: Maybe<usize> = std.io.writeSpan(path_buf, pc, name)
+    if p2.has { pc = p2.value }
+    let api_path: Span<u8> = std.io.written(path_buf, pc)
+
+    let req: Maybe<Span<u8>> = buildGetRequest(req_buf, registry_url, api_path)
+    if !req.has { return false }
+
+    let result: HttpResult = std.http.fetch(client, req.value, resp_buf, std.time.ms(10000))
+    if !std.http.resultOk(result) { return false }
+    if std.http.resultStatus(result) != 200_u16 { return false }
+
+    let body: Maybe<Span<u8>> = std.http.responseBody(resp_buf, result)
+    if !body.has { return false }
+
+    // Parse name
+    var dec64: [64]u8 = [0_u8; 64]
+    let name_raw: Maybe<Span<u8>> = std.json.field(body.value, "name")
+    if name_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(dec64, name_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.name, d.value)
+            out.name_len = n
+        }
+    }
+
+    // Parse latest
+    var dec32: [32]u8 = [0_u8; 32]
+    let latest_raw: Maybe<Span<u8>> = std.json.field(body.value, "latest")
+    if latest_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(dec32, latest_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.latest, d.value)
+            out.latest_len = n
+        }
+    }
+
+    // Parse description
+    var dec256: [256]u8 = [0_u8; 256]
+    let desc_raw: Maybe<Span<u8>> = std.json.field(body.value, "description")
+    if desc_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(dec256, desc_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.desc, d.value)
+            out.desc_len = n
+        }
+    }
+
+    return out.name_len > 0
+}
+
+// Fetch version-specific metadata from the registry.
+// Returns true on success, populates `out`.
+pub fn fetchVersionInfo( client: HttpClient, registry_url: Span<u8>, name: Span<u8>, version: Span<u8>, req_buf: MutSpan<u8>, resp_buf: MutSpan<u8>, out: mutref<RegVersionInfo> ) -> Bool {
+    var path_buf: [160]u8 = [0_u8; 160]
+    var pc: usize = 0
+    let p1: Maybe<usize> = std.io.writeSpan(path_buf, pc, "/v1/packages/")
+    if p1.has { pc = p1.value }
+    let p2: Maybe<usize> = std.io.writeSpan(path_buf, pc, name)
+    if p2.has { pc = p2.value }
+    let p3: Maybe<usize> = std.io.writeSpan(path_buf, pc, "/")
+    if p3.has { pc = p3.value }
+    let p4: Maybe<usize> = std.io.writeSpan(path_buf, pc, version)
+    if p4.has { pc = p4.value }
+    let api_path: Span<u8> = std.io.written(path_buf, pc)
+
+    let req: Maybe<Span<u8>> = buildGetRequest(req_buf, registry_url, api_path)
+    if !req.has { return false }
+
+    let result: HttpResult = std.http.fetch(client, req.value, resp_buf, std.time.ms(10000))
+    if !std.http.resultOk(result) { return false }
+    if std.http.resultStatus(result) != 200_u16 { return false }
+
+    let body: Maybe<Span<u8>> = std.http.responseBody(resp_buf, result)
+    if !body.has { return false }
+
+    var dec64: [64]u8 = [0_u8; 64]
+    var dec32: [32]u8 = [0_u8; 32]
+    var dec256: [256]u8 = [0_u8; 256]
+    var dec80: [80]u8 = [0_u8; 80]
+
+    let name_raw: Maybe<Span<u8>> = std.json.field(body.value, "name")
+    if name_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(dec64, name_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.name, d.value)
+            out.name_len = n
+        }
+    }
+
+    let ver_raw: Maybe<Span<u8>> = std.json.field(body.value, "version")
+    if ver_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(dec32, ver_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.version, d.value)
+            out.ver_len = n
+        }
+    }
+
+    let url_raw: Maybe<Span<u8>> = std.json.field(body.value, "download_url")
+    if url_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(dec256, url_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.url, d.value)
+            out.url_len = n
+        }
+    }
+
+    let cs_raw: Maybe<Span<u8>> = std.json.field(body.value, "checksum")
+    if cs_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(dec80, cs_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.checksum, d.value)
+            out.cs_len = n
+        }
+    }
+
+    return out.name_len > 0 && out.ver_len > 0
+}

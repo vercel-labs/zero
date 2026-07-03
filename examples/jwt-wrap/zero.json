@@ -1,0 +1,25 @@
+{
+  "package": {
+    "name": "jwt-wrap",
+    "version": "0.1.0",
+    "license": "MIT"
+  },
+  "targets": {
+    "cli": {
+      "kind": "exe",
+      "main": "src/jwt.0"
+    }
+  },
+  "profiles": {
+    "dev":           { "inherits": "dev" },
+    "release-small": { "inherits": "release-small" }
+  },
+  "c": {
+    "libs": {
+      "argon2_wrap": {
+        "headers": ["c/argon2_wrap.h"],
+        "link": ["argon2"]
+      }
+    }
+  }
+}

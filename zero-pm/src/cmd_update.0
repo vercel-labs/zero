@@ -1,0 +1,153 @@
+// cmd_update.0 — `0pm update [name]` — update one or all packages to latest
+
+use std.mem
+use std.fs
+use std.args
+use std.net
+use std.http
+use std.env
+use std.io
+
+use types
+use manifest
+use lockfile
+use semver
+use registry
+use resolver
+use installer
+use output
+
+pub fn runUpdate(world: World) -> CmdResult raises {
+    let fs: Fs = std.fs.host()
+
+    var m: Manifest = Manifest { pkg_name:        [0_u8; 64], name_len:        0, pkg_version:     [0_u8; 32], ver_len:         0, raw_targets:     [0_u8; 512], raw_targets_len: 0, raw_deps:        [0_u8; 2048], raw_deps_len:    0, dep_count:       0 }
+    if !readManifest(fs, "zero.json", &mut m) {
+        return CmdResult.err("zero.json not found")
+    }
+    if m.dep_count == 0 {
+        check printLine(world, "no dependencies to update")
+        return CmdResult.ok
+    }
+
+    var registry_buf: [128]u8 = [0_u8; 128]
+    let reg_env: Maybe<String> = std.env.get("ZERO_REGISTRY")
+    var registry_url: Span<u8> = "https://registry.zerolang.ai"
+    if reg_env.has {
+        let rn: usize = std.mem.copy(registry_buf, std.mem.span(reg_env.value))
+        registry_url = registry_buf[..rn]
+    }
+
+    let client: HttpClient = std.http.client(std.net.host())
+    var req_buf:  [512]u8  = [0_u8; 512]
+    var resp_buf: [8192]u8 = [0_u8; 8192]
+
+    // Optionally filter to a single named package
+    var filter_buf: [64]u8 = [0_u8; 64]
+    var filter_len: usize  = 0
+    let filter_arg: Maybe<String> = std.args.get(2)
+    if filter_arg.has {
+        let fc: usize = std.mem.copy(filter_buf, std.mem.span(filter_arg.value))
+        filter_len = fc
+    }
+
+    // For each dep that matches the filter (or all), fetch latest and update the version
+    var updated: usize = 0
+    var i: usize = 0
+    while i < m.dep_count {
+        var dep: DepEntry = DepEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, path: [0_u8; 128], path_len: 0, is_local: false }
+        if !getDep(&m, i, &mut dep) {
+            i = i + 1
+            continue
+        }
+        // Skip local deps
+        if dep.is_local {
+            i = i + 1
+            continue
+        }
+        // Apply name filter if given
+        if filter_len > 0 {
+            if !std.mem.eql(dep.name[..dep.name_len], filter_buf[..filter_len]) {
+                i = i + 1
+                continue
+            }
+        }
+
+        var info: RegPackageInfo = RegPackageInfo { name:   [0_u8; 64],  name_len:   0, latest: [0_u8; 32],  latest_len: 0, desc:   [0_u8; 256], desc_len:   0 }
+        if !fetchPackageInfo(client, registry_url, dep.name[..dep.name_len], req_buf, resp_buf, &mut info) {
+            i = i + 1
+            continue
+        }
+
+        // Compare current vs latest
+        let cur_sv_m: SemVerOpt  = semverParse(dep.version[..dep.ver_len])
+        let lat_sv_m: SemVerOpt  = semverParse(info.latest[..info.latest_len])
+        if cur_sv_m.has && lat_sv_m.has {
+            if semverCompare(lat_sv_m.value, cur_sv_m.value) > 0 {
+                let vc: usize = std.mem.copy(dep.version, info.latest[..info.latest_len])
+                dep.ver_len = vc
+                addDep(&mut m, &dep)
+                updated = updated + 1
+
+                var msg_buf: [96]u8 = [0_u8; 96]
+                var mc: usize = 0
+                let a1: Maybe<usize> = std.io.writeSpan(msg_buf, mc, "updating ")
+                if a1.has { mc = a1.value }
+                let a2: Maybe<usize> = std.io.writeSpan(msg_buf, mc, dep.name[..dep.name_len])
+                if a2.has { mc = a2.value }
+                let a3: Maybe<usize> = std.io.writeSpan(msg_buf, mc, " to ")
+                if a3.has { mc = a3.value }
+                let a4: Maybe<usize> = std.io.writeSpan(msg_buf, mc, info.latest[..info.latest_len])
+                if a4.has { mc = a4.value }
+                check printLine(world, std.io.written(msg_buf, mc))
+            }
+        }
+        i = i + 1
+    }
+
+    if updated == 0 {
+        check printLine(world, "all packages are up to date")
+        return CmdResult.ok
+    }
+
+    if !writeManifest(fs, "zero.json", &m) {
+        return CmdResult.err("failed to write zero.json")
+    }
+
+    // Re-resolve and install
+    var resolved: [64]ResolvedPkg = [ResolvedPkg { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, url: [0_u8; 256], url_len: 0, checksum: [0_u8; 80], cs_len: 0 }; 64]
+    let count: usize = resolve(client, registry_url, &m, req_buf, resp_buf, resolved)
+    let sentinel: usize = 18446744073709551615_usize
+    if count == sentinel {
+        return CmdResult.err("dependency resolution failed")
+    }
+
+    var dl_buf: [65536]u8 = [0_u8; 65536]
+    var j: usize = 0
+    while j < count {
+        let p: ResolvedPkg = resolved[j]
+        install(client, p.name[..p.name_len], p.version[..p.ver_len], p.url[..p.url_len], p.checksum[..p.cs_len], req_buf, dl_buf)
+        j = j + 1
+    }
+
+    // Rewrite lockfile
+    var lk: Lockfile = Lockfile { schema_version: 1_u32, raw_pkgs:       [0_u8; 4096], raw_len:        0, count:          0 }
+    var k: usize = 0
+    while k < count {
+        let p: ResolvedPkg = resolved[k]
+        var entry: LockEntry = LockEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, url: [0_u8; 256], url_len: 0, checksum: [0_u8; 80], cs_len: 0 }
+        let nc: usize = std.mem.copy(entry.name, p.name[..p.name_len])
+        entry.name_len = nc
+        let vc: usize = std.mem.copy(entry.version, p.version[..p.ver_len])
+        entry.ver_len = vc
+        let uc: usize = std.mem.copy(entry.url, p.url[..p.url_len])
+        entry.url_len = uc
+        let cc: usize = std.mem.copy(entry.checksum, p.checksum[..p.cs_len])
+        entry.cs_len = cc
+        setEntry(&mut lk, &entry)
+        k = k + 1
+    }
+    writeLockfile(fs, ".zero/zero.lock.json", &lk)
+
+    check printLine(world, "packages updated")
+    return CmdResult.ok
+}

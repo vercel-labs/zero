@@ -1,0 +1,66 @@
+// cmd_info.0 — `0pm info <name>` — show package details
+
+use std.mem
+use std.fs
+use std.args
+use std.net
+use std.http
+use std.env
+use std.io
+
+use types
+use lockfile
+use registry
+use output
+
+pub fn runInfo(world: World) -> CmdResult raises {
+    let fs: Fs = std.fs.host()
+
+    let name_arg: Maybe<String> = std.args.get(2)
+    if !name_arg.has {
+        return CmdResult.err("usage: 0pm info <name>")
+    }
+    let name_span: Span<u8> = std.mem.span(name_arg.value)
+
+    // Check lockfile first for installed version
+    var lk: Lockfile = Lockfile { schema_version: 1_u32, raw_pkgs:       [0_u8; 4096], raw_len:        0, count:          0 }
+    let has_lock: Bool = readLockfile(fs, ".zero/zero.lock.json", &mut lk)
+    if has_lock {
+        let idx: usize = findEntry(&lk, name_span)
+        if idx < lk.count {
+            var entry: LockEntry = LockEntry { name:     [0_u8; 64], name_len: 0, version:  [0_u8; 32], ver_len:  0, url:      [0_u8; 256], url_len:  0, checksum: [0_u8; 80],  cs_len:   0 }
+            if getEntry(&lk, idx, &mut entry) {
+                check printKeyValue(world, "name",     entry.name[..entry.name_len])
+                check printKeyValue(world, "version",  entry.version[..entry.ver_len])
+                check printKeyValue(world, "url",      entry.url[..entry.url_len])
+                check printKeyValue(world, "checksum", entry.checksum[..entry.cs_len])
+                check printKeyValue(world, "status",   "installed")
+                return CmdResult.ok
+            }
+        }
+    }
+
+    // Not in lockfile — query registry
+    var registry_buf: [128]u8 = [0_u8; 128]
+    let reg_env: Maybe<String> = std.env.get("ZERO_REGISTRY")
+    var registry_url: Span<u8> = "https://registry.zerolang.ai"
+    if reg_env.has {
+        let rn: usize = std.mem.copy(registry_buf, std.mem.span(reg_env.value))
+        registry_url = registry_buf[..rn]
+    }
+
+    let client: HttpClient = std.http.client(std.net.host())
+    var req_buf:  [512]u8  = [0_u8; 512]
+    var resp_buf: [8192]u8 = [0_u8; 8192]
+
+    var info: RegPackageInfo = RegPackageInfo { name:   [0_u8; 64],  name_len:   0, latest: [0_u8; 32],  latest_len: 0, desc:   [0_u8; 256], desc_len:   0 }
+    if !fetchPackageInfo(client, registry_url, name_span, req_buf, resp_buf, &mut info) {
+        return CmdResult.err("package not found")
+    }
+
+    check printKeyValue(world, "name",        info.name[..info.name_len])
+    check printKeyValue(world, "latest",      info.latest[..info.latest_len])
+    check printKeyValue(world, "description", info.desc[..info.desc_len])
+    check printKeyValue(world, "status",      "not installed")
+    return CmdResult.ok
+}

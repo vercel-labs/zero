@@ -1,0 +1,170 @@
+// semver.0 — SemVer parsing, comparison, and constraint matching
+
+use std.mem
+use std.parse
+use std.fmt
+use std.io
+
+use types
+
+// Parse "major.minor.patch" from a Span<u8>. Returns null on malformed input.
+pub fn semverParse(text: Span<u8>) -> SemVerOpt {
+    let len: usize = std.mem.len(text)
+    if len == 0 {
+        return semverNone()
+    }
+    var pos: usize = 0
+
+    // major
+    let major_m: Maybe<u32> = std.parse.parseU32(text[pos..])
+    if !major_m.has {
+        return semverNone()
+    }
+    let major: u32 = major_m.value
+    // skip over digits
+    while pos < len && text[pos] >= 48_u8 && text[pos] <= 57_u8 {
+        pos = pos + 1
+    }
+    if pos >= len || text[pos] != 46_u8 {
+        return semverNone()
+    }
+    pos = pos + 1
+
+    // minor
+    let minor_m: Maybe<u32> = std.parse.parseU32(text[pos..])
+    if !minor_m.has {
+        return semverNone()
+    }
+    let minor: u32 = minor_m.value
+    while pos < len && text[pos] >= 48_u8 && text[pos] <= 57_u8 {
+        pos = pos + 1
+    }
+    if pos >= len || text[pos] != 46_u8 {
+        return semverNone()
+    }
+    pos = pos + 1
+
+    // patch
+    let patch_m: Maybe<u32> = std.parse.parseU32(text[pos..])
+    if !patch_m.has {
+        return semverNone()
+    }
+    let patch: u32 = patch_m.value
+
+    let sv: SemVer = SemVer { major: major, minor: minor, patch: patch }
+    return semverSome(sv)
+}
+
+// Absent SemVerOpt. value is zeroed but should never be read while has is false.
+fn semverNone() -> SemVerOpt {
+    let zero: SemVer = SemVer { major: 0_u32, minor: 0_u32, patch: 0_u32 }
+    let none: SemVerOpt = SemVerOpt { has: false, value: zero }
+    return none
+}
+
+// Present SemVerOpt wrapping a parsed value.
+fn semverSome(v: SemVer) -> SemVerOpt {
+    let some: SemVerOpt = SemVerOpt { has: true, value: v }
+    return some
+}
+
+// Compare two SemVer values. Returns -1, 0, or 1.
+pub fn semverCompare(a: SemVer, b: SemVer) -> i32 {
+    if a.major < b.major { return -1 }
+    if a.major > b.major { return 1 }
+    if a.minor < b.minor { return -1 }
+    if a.minor > b.minor { return 1 }
+    if a.patch < b.patch { return -1 }
+    if a.patch > b.patch { return 1 }
+    return 0
+}
+
+// Check if `candidate` satisfies `constraint`.
+// Supports:
+//   "1.2.3"   — exact match
+//   "^1.2.3"  — compatible: same major, >= minor.patch
+//   ">=1.2.3" — greater or equal
+pub fn semverSatisfies(candidate: SemVer, constraint: Span<u8>) -> Bool {
+    let clen: usize = std.mem.len(constraint)
+    if clen == 0 {
+        return false
+    }
+    if constraint[0] == 94_u8 {
+        // "^X.Y.Z" — same major, >= minor+patch
+        let req_m: SemVerOpt = semverParse(constraint[1..])
+        if !req_m.has {
+            return false
+        }
+        let req: SemVer = req_m.value
+        if candidate.major != req.major {
+            return false
+        }
+        return semverCompare(candidate, req) >= 0
+    }
+    if clen >= 2 && constraint[0] == 62_u8 && constraint[1] == 61_u8 {
+        // ">=X.Y.Z"
+        let req_m: SemVerOpt = semverParse(constraint[2..])
+        if !req_m.has {
+            return false
+        }
+        return semverCompare(candidate, req_m.value) >= 0
+    }
+    // exact match
+    let req_m: SemVerOpt = semverParse(constraint)
+    if !req_m.has {
+        return false
+    }
+    return semverCompare(candidate, req_m.value) == 0
+}
+
+// Format a single u32 into buf at cursor. Uses a scoped local buffer so the
+// formatting borrow ends before the caller reuses its own buffer.
+fn semverWriteU32(buf: MutSpan<u8>, cursor: usize, value: u32) -> Maybe<usize> {
+    var num_buf: [16]u8 = [0_u8; 16]
+    let s: Maybe<Span<u8>> = std.fmt.u32(num_buf, value)
+    if !s.has { return null }
+    return std.io.writeSpan(buf, cursor, s.value)
+}
+
+// Format SemVer into buf as "major.minor.patch". Returns written span or null.
+pub fn semverFormat(buf: MutSpan<u8>, v: SemVer) -> Maybe<Span<u8>> {
+    var cursor: usize = 0
+
+    let c1: Maybe<usize> = semverWriteU32(buf, cursor, v.major)
+    if !c1.has { return null }
+    cursor = c1.value
+
+    let c2: Maybe<usize> = std.io.writeSpan(buf, cursor, ".")
+    if !c2.has { return null }
+    cursor = c2.value
+
+    let c3: Maybe<usize> = semverWriteU32(buf, cursor, v.minor)
+    if !c3.has { return null }
+    cursor = c3.value
+
+    let c4: Maybe<usize> = std.io.writeSpan(buf, cursor, ".")
+    if !c4.has { return null }
+    cursor = c4.value
+
+    let c5: Maybe<usize> = semverWriteU32(buf, cursor, v.patch)
+    if !c5.has { return null }
+    cursor = c5.value
+
+    return std.io.written(buf, cursor)
+}
+
+test "semver parse ok" {
+    let v: SemVerOpt = semverParse("1.2.3")
+    expect v.has && v.value.major == 1_u32 && v.value.minor == 2_u32 && v.value.patch == 3_u32
+}
+
+test "semver compare" {
+    let a: SemVer = SemVer { major: 1_u32, minor: 0_u32, patch: 0_u32 }
+    let b: SemVer = SemVer { major: 2_u32, minor: 0_u32, patch: 0_u32 }
+    expect semverCompare(a, b) == -1 && semverCompare(b, a) == 1 && semverCompare(a, a) == 0
+}
+
+test "semver satisfies caret" {
+    let c: SemVer = SemVer { major: 1_u32, minor: 5_u32, patch: 0_u32 }
+    expect semverSatisfies(c, "^1.0.0") && !semverSatisfies(c, "^2.0.0")
+}

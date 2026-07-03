@@ -1,0 +1,71 @@
+// output.0 — formatted console output helpers
+// No project-internal imports.
+
+use std.mem
+use std.io
+use std.fmt
+
+fn writeAll(dest: World, text: Span<u8>) -> Void raises {
+    check dest.out.write(text)
+}
+
+pub fn printLine(world: World, text: Span<u8>) -> Void raises {
+    var buf: [512]u8 = [0_u8; 512]
+    let c1: Maybe<usize> = std.io.writeSpan(buf, 0, text)
+    if !c1.has {
+        check world.out.write(text)
+        check world.out.write("\n")
+        return
+    }
+    let c2: Maybe<usize> = std.io.writeSpan(buf, c1.value, "\n")
+    var end: usize = c1.value
+    if c2.has { end = c2.value }
+    check world.out.write(std.io.written(buf, end))
+}
+
+pub fn printError(world: World, text: Span<u8>) -> Void raises {
+    check world.err.write("error: ")
+    check world.err.write(text)
+    check world.err.write("\n")
+}
+
+pub fn printPackage(world: World, name: Span<u8>, version: Span<u8>) -> Void raises {
+    var buf: [128]u8 = [0_u8; 128]
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(buf, cursor, name)
+    if c1.has { cursor = c1.value }
+    let c2: Maybe<usize> = std.io.writeSpan(buf, cursor, "@")
+    if c2.has { cursor = c2.value }
+    let c3: Maybe<usize> = std.io.writeSpan(buf, cursor, version)
+    if c3.has { cursor = c3.value }
+    let c4: Maybe<usize> = std.io.writeSpan(buf, cursor, "\n")
+    if c4.has { cursor = c4.value }
+    check world.out.write(std.io.written(buf, cursor))
+}
+
+pub fn printKeyValue(world: World, key: Span<u8>, value: Span<u8>) -> Void raises {
+    var buf: [320]u8 = [0_u8; 320]
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(buf, cursor, key)
+    if c1.has { cursor = c1.value }
+    let c2: Maybe<usize> = std.io.writeSpan(buf, cursor, ": ")
+    if c2.has { cursor = c2.value }
+    let c3: Maybe<usize> = std.io.writeSpan(buf, cursor, value)
+    if c3.has { cursor = c3.value }
+    let c4: Maybe<usize> = std.io.writeSpan(buf, cursor, "\n")
+    if c4.has { cursor = c4.value }
+    check world.out.write(std.io.written(buf, cursor))
+}
+
+pub fn printUsage(world: World) -> Void raises {
+    check world.out.write("zero-pm v0.1.0 — zerolang package manager\n\n")
+    check world.out.write("usage: 0pm <command> [args]\n\n")
+    check world.out.write("commands:\n")
+    check world.out.write("  init [name]         create zero.json in current directory\n")
+    check world.out.write("  install             install all dependencies\n")
+    check world.out.write("  add <name[@ver]>    add a dependency\n")
+    check world.out.write("  remove <name>       remove a dependency\n")
+    check world.out.write("  list                list installed packages\n")
+    check world.out.write("  info <name>         show package information\n")
+    check world.out.write("  update [name]       update dependency to latest\n")
+}

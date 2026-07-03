@@ -1,0 +1,77 @@
+// cache.0 — local package cache in ~/.zero/packages/<name>/<version>/
+// Uses native C++ extension (zpm_native.h) for mkdir -p.
+
+use std.mem
+use std.fs
+use std.path
+use std.env
+use std.io
+
+use types
+
+extern c "native/zpm_native.h" as zpm
+
+// Write path bytes into the native input buffer.
+fn writeInputBytes(path: Span<u8>) -> Void {
+    let len: usize = std.mem.len(path)
+    var i: usize = 0
+    while i < len {
+        zpm.write_input(i as i32, path[i])
+        i = i + 1
+    }
+}
+
+// Build path ~/.zero/packages/<name>/<version> into `buf`.
+pub fn packageDir(buf: MutSpan<u8>, name: Span<u8>, version: Span<u8>) -> Maybe<String> {
+    let home: String = std.env.getOr("HOME", "/tmp")
+    var tmp1: [256]u8 = [0_u8; 256]
+    var tmp2: [256]u8 = [0_u8; 256]
+    var tmp3: [256]u8 = [0_u8; 256]
+    let p1: Maybe<String> = std.path.join(tmp1, home, ".zero")
+    if !p1.has { return null }
+    let p2: Maybe<String> = std.path.join(tmp2, p1.value, "packages")
+    if !p2.has { return null }
+    let p3: Maybe<String> = std.path.join(tmp3, p2.value, name)
+    if !p3.has { return null }
+    return std.path.join(buf, p3.value, version)
+}
+
+// Check if a package version is already present in the cache.
+pub fn isCached(name: Span<u8>, version: Span<u8>) -> Bool {
+    let fs: Fs = std.fs.host()
+    var dir_buf: [384]u8 = [0_u8; 384]
+    let dir_m: Maybe<String> = packageDir(dir_buf, name, version)
+    if !dir_m.has { return false }
+    var marker_buf: [400]u8 = [0_u8; 400]
+    let marker_m: Maybe<String> = std.path.join(marker_buf, dir_m.value, ".zpm-ok")
+    if !marker_m.has { return false }
+    let f_m: Maybe<owned<File>> = std.fs.open(fs, marker_m.value)
+    if f_m.has {
+        var file: owned<File> = f_m.value
+        std.fs.close(&mut file)
+        return true
+    }
+    return false
+}
+
+// Create the cache directory tree using the native mkdir -p extension.
+pub fn ensureDir(name: Span<u8>, version: Span<u8>) -> Bool {
+    var dir_buf: [384]u8 = [0_u8; 384]
+    let dir_m: Maybe<String> = packageDir(dir_buf, name, version)
+    if !dir_m.has { return false }
+    writeInputBytes(dir_m.value)
+    let rc: i32 = zpm.mkdir_p(std.mem.len(dir_m.value) as i32)
+    return rc == 0
+}
+
+// Write a .zpm-ok marker file after successful install.
+pub fn markCached(name: Span<u8>, version: Span<u8>) -> Bool {
+    let fs: Fs = std.fs.host()
+    var dir_buf: [384]u8 = [0_u8; 384]
+    let dir_m: Maybe<String> = packageDir(dir_buf, name, version)
+    if !dir_m.has { return false }
+    var marker_buf: [400]u8 = [0_u8; 400]
+    let marker_m: Maybe<String> = std.path.join(marker_buf, dir_m.value, ".zpm-ok")
+    if !marker_m.has { return false }
+    return std.fs.writeFile(fs, marker_m.value, "ok")
+}

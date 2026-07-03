@@ -1,0 +1,107 @@
+// types.0 — shared data types for zero-pm
+// No project-internal imports; all types are plain zerolang structs/choices.
+
+// A single dependency entry (remote version string or local path+version)
+type DepEntry {
+    name:     [64]u8,
+    name_len: usize,
+    version:  [32]u8,
+    ver_len:  usize,
+    path:     [128]u8,
+    path_len: usize,
+    is_local: Bool,
+}
+
+// Parsed zero.json. raw_deps holds the raw JSON of the "dependencies" object.
+type Manifest {
+    pkg_name:        [64]u8,
+    name_len:        usize,
+    pkg_version:     [32]u8,
+    ver_len:         usize,
+    raw_targets:     [512]u8,
+    raw_targets_len: usize,
+    raw_deps:        [2048]u8,
+    raw_deps_len:    usize,
+    dep_count:       usize,
+}
+
+// A single resolved/locked package entry
+type LockEntry {
+    name:     [64]u8,
+    name_len: usize,
+    version:  [32]u8,
+    ver_len:  usize,
+    url:      [256]u8,
+    url_len:  usize,
+    checksum: [80]u8,
+    cs_len:   usize,
+}
+
+// The full lockfile (flat list of resolved packages, no nested deps)
+type Lockfile {
+    schema_version: u32,
+    raw_pkgs:       [4096]u8,
+    raw_len:        usize,
+    count:          usize,
+}
+
+// Parsed semantic version
+type SemVer {
+    major: u32,
+    minor: u32,
+    patch: u32,
+}
+
+// Hand-rolled optional for SemVer. The language only auto-wraps byte-span-like
+// values into Maybe<T>, so a struct payload needs an explicit presence flag.
+type SemVerOpt {
+    has:   Bool,
+    value: SemVer,
+}
+
+// Registry package-level metadata
+type RegPackageInfo {
+    name:       [64]u8,
+    name_len:   usize,
+    latest:     [32]u8,
+    latest_len: usize,
+    desc:       [256]u8,
+    desc_len:   usize,
+}
+
+// Registry version-specific metadata
+type RegVersionInfo {
+    name:     [64]u8,
+    name_len: usize,
+    version:  [32]u8,
+    ver_len:  usize,
+    url:      [256]u8,
+    url_len:  usize,
+    checksum: [80]u8,
+    cs_len:   usize,
+}
+
+// A package that has been resolved (name + pinned version)
+type ResolvedPkg {
+    name:     [64]u8,
+    name_len: usize,
+    version:  [32]u8,
+    ver_len:  usize,
+    url:      [256]u8,
+    url_len:  usize,
+    checksum: [80]u8,
+    cs_len:   usize,
+}
+
+// Output struct for nextEntry (avoids mutref<usize> which zerolang disallows on primitives)
+type EntryOut {
+    key_len:   usize,
+    val_start: usize,
+    val_end:   usize,
+}
+
+// Command result returned by every cmd_*.run()
+choice CmdResult {
+    ok,
+    err: String,
+}

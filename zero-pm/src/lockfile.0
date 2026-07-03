@@ -1,0 +1,327 @@
+// lockfile.0 — read and write .zero/zero.lock.json
+
+use std.mem
+use std.fs
+use std.io
+use std.json
+use std.fmt
+
+use types
+use manifest
+
+// Parse a LockEntry from its JSON object value span. Returns true on success.
+fn parseLockEntry(json: Span<u8>, out: mutref<LockEntry>) -> Bool {
+    var dec: [256]u8 = [0_u8; 256]
+
+    // name
+    let name_raw: Maybe<Span<u8>> = std.json.field(json, "name")
+    if name_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(dec, name_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.name, d.value)
+            out.name_len = n
+        }
+    }
+
+    // version
+    var vbuf: [32]u8 = [0_u8; 32]
+    let ver_raw: Maybe<Span<u8>> = std.json.field(json, "version")
+    if ver_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(vbuf, ver_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.version, d.value)
+            out.ver_len = n
+        }
+    }
+
+    // url
+    var ubuf: [256]u8 = [0_u8; 256]
+    let url_raw: Maybe<Span<u8>> = std.json.field(json, "url")
+    if url_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(ubuf, url_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.url, d.value)
+            out.url_len = n
+        }
+    }
+
+    // checksum
+    var cbuf: [80]u8 = [0_u8; 80]
+    let cs_raw: Maybe<Span<u8>> = std.json.field(json, "checksum")
+    if cs_raw.has {
+        let d: Maybe<Span<u8>> = decodeStr(cbuf, cs_raw.value)
+        if d.has {
+            let n: usize = std.mem.copy(out.checksum, d.value)
+            out.cs_len = n
+        }
+    }
+
+    return out.name_len > 0 && out.ver_len > 0
+}
+
+// Read .zero/zero.lock.json into `lk`. Returns true on success.
+pub fn readLockfile(fs: Fs, path: String, lk: mutref<Lockfile>) -> Bool {
+    var read_buf: [8192]u8 = [0_u8; 8192]
+    let n_m: Maybe<usize> = std.fs.readFile(fs, path, read_buf)
+    if !n_m.has {
+        return false
+    }
+    let bytes: Span<u8> = read_buf[..n_m.value]
+
+    let ver_m: Maybe<u32> = std.json.u32(bytes, "version")
+    if ver_m.has {
+        lk.schema_version = ver_m.value
+    } else {
+        lk.schema_version = 1_u32
+    }
+
+    let pkgs_m: Maybe<Span<u8>> = std.json.field(bytes, "packages")
+    if !pkgs_m.has {
+        lk.count = 0
+        return true
+    }
+
+    let pkgs_json: Span<u8> = pkgs_m.value
+    let n: usize = std.mem.copy(lk.raw_pkgs, pkgs_json)
+    lk.raw_len = n
+    lk.count = countObjEntries(pkgs_json)
+    return true
+}
+
+// Retrieve LockEntry at `index`. Returns true on success.
+pub fn getEntry(lk: ref<Lockfile>, index: usize, out: mutref<LockEntry>) -> Bool {
+    if index >= lk.count {
+        return false
+    }
+    let pkgs: Span<u8> = lk.raw_pkgs[..lk.raw_len]
+    let plen: usize = std.mem.len(pkgs)
+    if plen < 2 || pkgs[0] != 123_u8 {
+        return false
+    }
+
+    var cur: usize = skipWsAt(pkgs, 1)
+    var found: usize = 0
+    var key_buf: [64]u8 = [0_u8; 64]
+
+    while cur < plen && pkgs[cur] != 125_u8 {
+        if pkgs[cur] == 44_u8 {
+            cur = skipWsAt(pkgs, cur + 1)
+        }
+        if cur >= plen || pkgs[cur] == 125_u8 {
+            return false
+        }
+        var eo: EntryOut = EntryOut { key_len: 0, val_start: 0, val_end: 0 }
+        let next: usize = nextEntry(pkgs, cur, key_buf, &mut eo)
+        if next == 0 {
+            return false
+        }
+        if found == index {
+            // the key is the package name, the value is the entry object
+            let n: usize = std.mem.copy(out.name, key_buf[..eo.key_len])
+            out.name_len = n
+            let val: Span<u8> = pkgs[eo.val_start..eo.val_end]
+            parseLockEntry(val, out)
+            // override name from key
+            let n2: usize = std.mem.copy(out.name, key_buf[..eo.key_len])
+            out.name_len = n2
+            return true
+        }
+        found = found + 1
+        cur = skipWsAt(pkgs, eo.val_end)
+    }
+    return false
+}
+
+// Find a LockEntry by name. Returns index or lk.count if not found.
+pub fn findEntry(lk: ref<Lockfile>, name: Span<u8>) -> usize {
+    var i: usize = 0
+    while i < lk.count {
+        var entry: LockEntry = LockEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, url: [0_u8; 256], url_len: 0, checksum: [0_u8; 80], cs_len: 0 }
+        if getEntry(lk, i, &mut entry) {
+            if std.mem.eql(entry.name[..entry.name_len], name) {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return lk.count
+}
+
+// Serialize the lock file to JSON in `buf`. Returns written span or null.
+fn serializeLockfile(lk: ref<Lockfile>, buf: MutSpan<u8>) -> Maybe<Span<u8>> {
+    var cursor: usize = 0
+    var ver_buf: [8]u8 = [0_u8; 8]
+    let ver_s: Maybe<Span<u8>> = std.fmt.u32(ver_buf, lk.schema_version)
+
+    let c1: Maybe<usize> = std.io.writeSpan(buf, cursor, "{\"version\": ")
+    if c1.has { cursor = c1.value }
+    if ver_s.has {
+        let c2: Maybe<usize> = std.io.writeSpan(buf, cursor, ver_s.value)
+        if c2.has { cursor = c2.value }
+    }
+    let c3: Maybe<usize> = std.io.writeSpan(buf, cursor, ", \"packages\": ")
+    if c3.has { cursor = c3.value }
+    if lk.raw_len > 0 {
+        let c4: Maybe<usize> = std.io.writeSpan(buf, cursor, lk.raw_pkgs[..lk.raw_len])
+        if c4.has { cursor = c4.value }
+    } else {
+        let c4: Maybe<usize> = std.io.writeSpan(buf, cursor, "{}")
+        if c4.has { cursor = c4.value }
+    }
+    let c5: Maybe<usize> = std.io.writeSpan(buf, cursor, "}\n")
+    if c5.has { cursor = c5.value }
+    return std.io.written(buf, cursor)
+}
+
+// Upsert a LockEntry into the lockfile. Returns true on success.
+pub fn setEntry(lk: mutref<Lockfile>, entry: ref<LockEntry>) -> Bool {
+    // Build the value JSON for this entry
+    var frag: [512]u8 = [0_u8; 512]
+    var fc: usize = 0
+
+    let f1: Maybe<usize> = std.io.writeSpan(frag, fc, "{\"version\": \"")
+    if f1.has { fc = f1.value }
+    let f2: Maybe<usize> = std.io.writeSpan(frag, fc, entry.version[..entry.ver_len])
+    if f2.has { fc = f2.value }
+    let f3: Maybe<usize> = std.io.writeSpan(frag, fc, "\", \"url\": \"")
+    if f3.has { fc = f3.value }
+    let f4: Maybe<usize> = std.io.writeSpan(frag, fc, entry.url[..entry.url_len])
+    if f4.has { fc = f4.value }
+    let f5: Maybe<usize> = std.io.writeSpan(frag, fc, "\", \"checksum\": \"")
+    if f5.has { fc = f5.value }
+    let f6: Maybe<usize> = std.io.writeSpan(frag, fc, entry.checksum[..entry.cs_len])
+    if f6.has { fc = f6.value }
+    let f7: Maybe<usize> = std.io.writeSpan(frag, fc, "\"}")
+    if f7.has { fc = f7.value }
+
+    // If name already exists, replace its value; otherwise append
+    let existing: usize = findEntry(lk, entry.name[..entry.name_len])
+    var new_pkgs: [4096]u8 = [0_u8; 4096]
+    var nc: usize = 0
+    let x1: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "{")
+    if x1.has { nc = x1.value }
+    var first: Bool = true
+    var i: usize = 0
+    while i < lk.count {
+        var e: LockEntry = LockEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, url: [0_u8; 256], url_len: 0, checksum: [0_u8; 80], cs_len: 0 }
+        if getEntry(lk, i, &mut e) {
+            if !first {
+                let cx: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, ", ")
+                if cx.has { nc = cx.value }
+            }
+            first = false
+            let cx1: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "\"")
+            if cx1.has { nc = cx1.value }
+            let cx2: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, e.name[..e.name_len])
+            if cx2.has { nc = cx2.value }
+            let cx3: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "\": ")
+            if cx3.has { nc = cx3.value }
+            if i == existing {
+                // use new fragment
+                let cx4: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, std.io.written(frag, fc))
+                if cx4.has { nc = cx4.value }
+            } else {
+                // keep old raw value — re-read from existing raw_pkgs
+                var old_e_buf: [512]u8 = [0_u8; 512]
+                let old_frag: Span<u8> = buildEntryFrag(e, old_e_buf)
+                let cx4: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, old_frag)
+                if cx4.has { nc = cx4.value }
+            }
+        }
+        i = i + 1
+    }
+    // Append new entry if not found
+    if existing == lk.count {
+        if !first {
+            let cx: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, ", ")
+            if cx.has { nc = cx.value }
+        }
+        let cx1: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "\"")
+        if cx1.has { nc = cx1.value }
+        let cx2: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, entry.name[..entry.name_len])
+        if cx2.has { nc = cx2.value }
+        let cx3: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "\": ")
+        if cx3.has { nc = cx3.value }
+        let cx4: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, std.io.written(frag, fc))
+        if cx4.has { nc = cx4.value }
+        lk.count = lk.count + 1
+    }
+    let cx: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "}")
+    if cx.has { nc = cx.value }
+    let copied: usize = std.mem.copy(lk.raw_pkgs, new_pkgs[..nc])
+    lk.raw_len = copied
+    return true
+}
+
+// Build entry fragment JSON from a LockEntry struct.
+fn buildEntryFrag(e: LockEntry, buf: MutSpan<u8>) -> Span<u8> {
+    var fc: usize = 0
+    let f1: Maybe<usize> = std.io.writeSpan(buf, fc, "{\"version\": \"")
+    if f1.has { fc = f1.value }
+    let f2: Maybe<usize> = std.io.writeSpan(buf, fc, e.version[..e.ver_len])
+    if f2.has { fc = f2.value }
+    let f3: Maybe<usize> = std.io.writeSpan(buf, fc, "\", \"url\": \"")
+    if f3.has { fc = f3.value }
+    let f4: Maybe<usize> = std.io.writeSpan(buf, fc, e.url[..e.url_len])
+    if f4.has { fc = f4.value }
+    let f5: Maybe<usize> = std.io.writeSpan(buf, fc, "\", \"checksum\": \"")
+    if f5.has { fc = f5.value }
+    let f6: Maybe<usize> = std.io.writeSpan(buf, fc, e.checksum[..e.cs_len])
+    if f6.has { fc = f6.value }
+    let f7: Maybe<usize> = std.io.writeSpan(buf, fc, "\"}")
+    if f7.has { fc = f7.value }
+    return std.io.written(buf, fc)
+}
+
+// Remove entry by name. Returns true if found and removed.
+pub fn removeEntry(lk: mutref<Lockfile>, name: Span<u8>) -> Bool {
+    let idx: usize = findEntry(lk, name)
+    if idx == lk.count {
+        return false
+    }
+    var new_pkgs: [4096]u8 = [0_u8; 4096]
+    var nc: usize = 0
+    let x1: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "{")
+    if x1.has { nc = x1.value }
+    var first: Bool = true
+    var i: usize = 0
+    while i < lk.count {
+        if i != idx {
+            var e: LockEntry = LockEntry { name: [0_u8; 64], name_len: 0, version: [0_u8; 32], ver_len: 0, url: [0_u8; 256], url_len: 0, checksum: [0_u8; 80], cs_len: 0 }
+            if getEntry(lk, i, &mut e) {
+                if !first {
+                    let cx: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, ", ")
+                    if cx.has { nc = cx.value }
+                }
+                first = false
+                let cx1: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "\"")
+                if cx1.has { nc = cx1.value }
+                let cx2: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, e.name[..e.name_len])
+                if cx2.has { nc = cx2.value }
+                let cx3: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "\": ")
+                if cx3.has { nc = cx3.value }
+                var frag_buf: [512]u8 = [0_u8; 512]
+                let frag: Span<u8> = buildEntryFrag(e, frag_buf)
+                let cx4: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, frag)
+                if cx4.has { nc = cx4.value }
+            }
+        }
+        i = i + 1
+    }
+    let cx: Maybe<usize> = std.io.writeSpan(new_pkgs, nc, "}")
+    if cx.has { nc = cx.value }
+    let copied: usize = std.mem.copy(lk.raw_pkgs, new_pkgs[..nc])
+    lk.raw_len = copied
+    lk.count = lk.count - 1
+    return true
+}
+
+// Write lockfile to `path`. Returns true on success.
+pub fn writeLockfile(fs: Fs, path: String, lk: ref<Lockfile>) -> Bool {
+    var out_buf: [6144]u8 = [0_u8; 6144]
+    let written: Maybe<Span<u8>> = serializeLockfile(lk, out_buf)
+    if !written.has {
+        return false
+    }
+    return std.fs.writeFile(fs, path, written.value)
+}
