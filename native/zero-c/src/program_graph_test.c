@@ -397,8 +397,17 @@ static bool pgt_eval_block(const ZProgramGraph *graph, PgtEnv *env, const ZProgr
   return true;
 }
 
-static bool pgt_eval_function(const ZProgramGraph *graph, const ZProgramGraphNode *fun, const PgtValue *args, size_t arg_len, PgtValue *out, PgtFailure *failure) {
-  if (!fun) { pgt_fail(failure, NULL, "zero test unknown function"); return false; }
+static bool pgt_eval_function(const ZProgramGraph *graph, const ZProgramGraphNode *fun, const char *callee, const ZProgramGraphNode *call_node, const PgtValue *args, size_t arg_len, PgtValue *out, PgtFailure *failure) {
+  if (!fun) {
+    char message[256];
+    if (callee && pgt_starts(callee, "std.")) {
+      snprintf(message, sizeof(message), "zero graph test runner does not implement '%s' yet; tests can call std.testing helpers and pure zerolang functions; use live smoke tests for other std calls", callee);
+    } else {
+      snprintf(message, sizeof(message), "zero test unknown function '%s'", callee && callee[0] ? callee : "<expr>");
+    }
+    pgt_fail(failure, call_node, message);
+    return false;
+  }
   if (pgt_child_count(graph, fun->id, "param") != arg_len) { pgt_fail(failure, fun, "zero test function argument count mismatch"); return false; }
   PgtEnv local = {0};
   for (size_t i = 0; i < arg_len; i++) pgt_env_set(&local, pgt_child(graph, fun->id, "param", i)->name, &args[i]);
@@ -468,7 +477,7 @@ static bool pgt_eval_call(const ZProgramGraph *graph, PgtEnv *env, const ZProgra
     out->kind = PGT_VOID;
     if (!pgt_truthy(&args[0])) { pgt_fail(failure, expr, "zero test expectation failed"); ok = false; }
   } else if (!pgt_std_call(callee, args, arg_len, out)) {
-    ok = pgt_eval_function(graph, pgt_function(graph, callee), args, arg_len, out, failure);
+    ok = pgt_eval_function(graph, pgt_function(graph, callee), callee, expr, args, arg_len, out, failure);
   }
   for (size_t i = 0; i < arg_len; i++) pgt_value_free(&args[i]);
   free(args);
@@ -540,7 +549,7 @@ static PgtRun pgt_run_tests(const ZProgramGraph *graph, const char *filter) {
     result.failure.column = fun->column > 0 ? fun->column : 1;
     long long test_started = pgt_now_ms();
     PgtValue ignored = {0};
-    bool ok = pgt_eval_function(graph, fun, NULL, 0, &ignored, &result.failure);
+    bool ok = pgt_eval_function(graph, fun, result.name, fun, NULL, 0, &ignored, &result.failure);
     result.duration_ms = pgt_now_ms() - test_started;
     pgt_value_free(&ignored);
     run.selected++;

@@ -5024,6 +5024,27 @@ assert.equal(graphPackageExpectedFail.location.sourceFile, "src/helper.0");
 assert.equal(graphPackageExpectedFail.location.line, 9);
 assert.equal(graphPackageExpectedFail.failure.sourceFile, "src/helper.0");
 assert.equal(graphPackageExpectedFail.failure.line, 10);
+// a test reaching a callee the runner cannot execute names that callee in the failure,
+// not just the test label; std.* outside std.testing gets the not-implemented framing
+const unknownCalleePackageDir = join(outDir, "test-unknown-callee-package");
+mkdirSync(join(unknownCalleePackageDir, "src"), { recursive: true });
+writeFileSync(
+  join(unknownCalleePackageDir, "src", "main.0"),
+  'pub fn main(world: World) -> Void raises {\n    check world.out.write("unknown callee\\n")\n}\n\nfn spanLensMatch(a: String, b: String) -> Bool {\n    return std.mem.len(std.mem.span(a)) == std.mem.len(std.mem.span(b))\n}\n\ntest "std call coverage" {\n    expect spanLensMatch("abc", "xyz")\n}\n',
+);
+writeZeroTomlSync(unknownCalleePackageDir, {
+  package: { name: "test-unknown-callee", version: "0.1.0" },
+  targets: { cli: { kind: "exe", main: "src/main.0" } },
+});
+assert.match(zero(["import", unknownCalleePackageDir]).stdout, /repository graph import ok/);
+const unknownCalleeTestJson = json(["test", "--json", unknownCalleePackageDir], { allowFailure: true });
+assert.equal(unknownCalleeTestJson.code, 1);
+assert.equal(unknownCalleeTestJson.body.failedTests, 1);
+const unknownCalleeResult = unknownCalleeTestJson.body.results.find((item) => item.name === "std call coverage");
+assert(unknownCalleeResult);
+assert.equal(unknownCalleeResult.status, "failed");
+assert.match(unknownCalleeResult.failure.message, /does not implement 'std\.mem\.(span|len)' yet/);
+assert.equal(unknownCalleeResult.failure.sourceFile, "src/main.0");
 mkdirSync(join(graphManifestPackageDir, "src"), { recursive: true });
 mkdirSync(join(graphManifestPackageDir, "artifacts"), { recursive: true });
 writeFileSync(join(graphManifestPackageDir, "src", "main.0"), readFileSync("conformance/packages/test-app/src/main.0", "utf8"));

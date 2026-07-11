@@ -58,10 +58,13 @@ Prefer `addTest` for one pure function call with literal arguments. Use
 `addTestBody name="..." ... end` only when the test needs custom body rows.
 Test labels are display names, not callable function names; do not rename them
 to `__zero_test_*`.
-If `zero test` reports an unknown function for a display label, do not rename
-the label to chase runner internals. Delete the malformed custom test and
-recreate simple pure coverage with `addTest`, or use behavior smoke checks for
-effectful paths.
+Test failures name the callee the runner could not execute. A `does not
+implement 'std.x.y' yet` failure means the function is real but the test
+runner only executes `std.testing` helpers and pure zerolang functions; keep
+that logic covered with a live smoke check (`zero run . -- <args>`) instead of
+deleting the test target. An `unknown function '<name>'` failure on a non-std
+name means the call does not resolve in the test graph; fix the call or
+re-import the package.
 
 If another tool hands you a derived ProgramGraph artifact, `zero test` can
 validate it. Do not create a standalone graph artifact for the ordinary package

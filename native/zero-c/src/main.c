@@ -9344,9 +9344,15 @@ static bool test_eval_stmt_vec(const Program *program, TestEnv *env, const StmtV
   return true;
 }
 
-static bool test_eval_function(const Program *program, const Function *fun, const TestValue *args, size_t arg_len, TestValue *out, TestRunFailure *failure) {
+static bool test_eval_function(const Program *program, const Function *fun, const char *callee, const Expr *call_expr, const TestValue *args, size_t arg_len, TestValue *out, TestRunFailure *failure) {
   if (!fun) {
-    test_fail(failure, NULL, "zero test unknown function");
+    char message[256];
+    if (callee && test_string_starts_with(callee, "std.")) {
+      snprintf(message, sizeof(message), "zero test direct runner does not implement '%s' yet; tests can call std.testing helpers and pure zerolang functions; use live smoke tests for other std calls", callee);
+    } else {
+      snprintf(message, sizeof(message), "zero test unknown function '%s'", callee && callee[0] ? callee : "<expr>");
+    }
+    test_fail(failure, call_expr, message);
     return false;
   }
   if (fun->params.len != arg_len) {
@@ -9431,8 +9437,7 @@ static bool test_eval_call_expr(const Program *program, TestEnv *env, const Expr
       test_fail(failure, expr, "zero test std helper argument count mismatch");
     }
   } else {
-    const Function *fun = find_program_function(program, callee_name);
-    ok = test_eval_function(program, fun, args, expr->args.len, out, failure);
+    ok = test_eval_function(program, find_program_function(program, callee_name), callee_name, expr, args, expr->args.len, out, failure);
   }
   for (size_t i = 0; i < expr->args.len; i++) test_value_free(&args[i]);
   free(args); zbuf_free(&name);
@@ -9519,7 +9524,7 @@ static int run_tests_direct(const Command *command, const SourceInput *input, co
     bool expected_failure = test_expected_failure(fun);
     long long test_started_ms = now_ms();
     TestValue ignored = {0};
-    bool ok = test_eval_function(program, fun, NULL, 0, &ignored, &failure);
+    bool ok = test_eval_function(program, fun, failure.current_test, NULL, NULL, 0, &ignored, &failure);
     long long test_duration_ms = now_ms() - test_started_ms;
     test_value_free(&ignored);
 
