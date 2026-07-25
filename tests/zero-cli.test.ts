@@ -279,4 +279,14 @@ describe("native zero CLI", () => {
     assert.equal(diagnostic.code, "BLD004");
     assert.match(diagnostic.help, /use zero check/);
   });
+
+  it("explains PAR100 and NAM003 diagnostic codes", async () => {
+    const par100 = await runZero(["explain", "PAR100"]);
+    assert.match(par100.stdout, /PAR100: Parser syntax error/);
+    assert.match(par100.stdout, /Repair the syntax at the reported parser span/);
+
+    const nam003 = await runZero(["explain", "NAM003"]);
+    assert.match(nam003.stdout, /NAM003: Unknown identifier/);
+    assert.match(nam003.stdout, /Declare the referenced symbol, import the module that provides it, or correct the identifier spelling/);
+  });
 });
