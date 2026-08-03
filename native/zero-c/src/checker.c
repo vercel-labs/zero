@@ -3949,11 +3949,21 @@ static const Shape *find_shape_for_type(const Program *program, const char *type
   const Shape *shape = find_shape(program, type);
   if (shape) return shape;
   if (!type) return NULL;
+  const char *open = strchr(type, '<');
+  if (!open) return NULL;
+  size_t type_len = strlen(type);
+  if (type[type_len - 1] != '>') return NULL;
+  size_t prefix_len = (size_t)(open - type);
   for (size_t i = 0; i < program->shapes.len; i++) {
     const Shape *candidate = &program->shapes.items[i];
+    if (candidate->type_params.len == 0) continue;
+    if (type[0] != candidate->name[0]) continue;
+    if (strncmp(type, candidate->name, prefix_len) != 0 || candidate->name[prefix_len] != '\0') {
+      continue;
+    }
     char **args = NULL;
     size_t arg_len = 0;
-    bool matched = candidate->type_params.len > 0 && type_generic_arg_list(type, candidate->name, &args, &arg_len) && arg_len == candidate->type_params.len;
+    bool matched = type_generic_arg_list(type, candidate->name, &args, &arg_len) && arg_len == candidate->type_params.len;
     free_type_arg_list(args, arg_len);
     if (matched) return candidate;
   }
