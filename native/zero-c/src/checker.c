@@ -2142,9 +2142,9 @@ static bool validate_shape_method_type_form(const char *type, ZDiag *diag, int l
 }
 
 static const TypeAlias *find_alias(const Program *program, const char *name) {
-  if (!program || !name) return NULL;
+  if (!program || !name || !name[0]) return NULL;
   for (size_t i = 0; i < program->aliases.len; i++) {
-    if (strcmp(program->aliases.items[i].name, name) == 0) return &program->aliases.items[i];
+    if (program->aliases.items[i].name[0] == name[0] && strcmp(program->aliases.items[i].name, name) == 0) return &program->aliases.items[i];
   }
   return NULL;
 }
@@ -2177,6 +2177,7 @@ static bool static_value_name_shadowed_by_type_param(const ParamVec *primary, co
 static const ParamVec *generic_type_params_for_name(const Program *program, const char *name);
 static bool type_core_generic_arg_kind_for_program(const void *context, const char *type_name, size_t arg_index, ZTypeArgKind *out_kind);
 static const Shape *find_shape_for_type(const Program *program, const char *type);
+static const Function *find_function(const Program *program, const char *name);
 static const Choice *find_choice(const Program *program, const char *name);
 static const Param *find_case(const ParamVec *cases, const char *name);
 static const Function *find_shape_method_decl(const Shape *shape, const char *name);
@@ -2202,16 +2203,15 @@ static ZUnifyBinding *checker_unify_trace_push(ZUnifyTrace *trace);
 static bool seed_type_core_static_const_bindings(const Program *program, const ZTypeBinderScope *scope, ZTypeBinderId first_const_id, ZUnifyTrace *trace);
 
 static bool function_exists(const Program *program, const char *name) {
-  if (strcmp(name, "expect") == 0) return true;
-  for (size_t i = 0; i < program->functions.len; i++) {
-    if (strcmp(program->functions.items[i].name, name) == 0) return true;
-  }
-  return false;
+  if (!name || !name[0]) return false;
+  if (name[0] == 'e' && strcmp(name, "expect") == 0) return true;
+  return find_function(program, name) != NULL;
 }
 
 static const Function *find_function(const Program *program, const char *name) {
+  if (!name || !name[0]) return NULL;
   for (size_t i = 0; i < program->functions.len; i++) {
-    if (strcmp(program->functions.items[i].name, name) == 0) return &program->functions.items[i];
+    if (program->functions.items[i].name[0] == name[0] && strcmp(program->functions.items[i].name, name) == 0) return &program->functions.items[i];
   }
   return NULL;
 }
@@ -3938,8 +3938,9 @@ static bool function_error_sets_include_stdlib_resolution(const Function *caller
 }
 
 static const Shape *find_shape(const Program *program, const char *name) {
+  if (!name || !name[0]) return NULL;
   for (size_t i = 0; i < program->shapes.len; i++) {
-    if (strcmp(program->shapes.items[i].name, name) == 0) return &program->shapes.items[i];
+    if (program->shapes.items[i].name[0] == name[0] && strcmp(program->shapes.items[i].name, name) == 0) return &program->shapes.items[i];
   }
   return NULL;
 }
@@ -3984,36 +3985,37 @@ static char *shape_field_type_for_owner(const Program *program, const Shape *sha
 }
 
 static const EnumDecl *find_enum(const Program *program, const char *name) {
+  if (!name || !name[0]) return NULL;
   for (size_t i = 0; i < program->enums.len; i++) {
-    if (strcmp(program->enums.items[i].name, name) == 0) return &program->enums.items[i];
+    if (program->enums.items[i].name[0] == name[0] && strcmp(program->enums.items[i].name, name) == 0) return &program->enums.items[i];
   }
   return NULL;
 }
 
 static const Choice *find_choice(const Program *program, const char *name) {
+  if (!name || !name[0]) return NULL;
   for (size_t i = 0; i < program->choices.len; i++) {
-    if (strcmp(program->choices.items[i].name, name) == 0) return &program->choices.items[i];
+    if (program->choices.items[i].name[0] == name[0] && strcmp(program->choices.items[i].name, name) == 0) return &program->choices.items[i];
   }
   return NULL;
 }
 
 static bool has_case(const ParamVec *cases, const char *name) {
-  for (size_t i = 0; i < cases->len; i++) {
-    if (strcmp(cases->items[i].name, name) == 0) return true;
-  }
-  return false;
+  return find_case(cases, name) != NULL;
 }
 
 static const Param *find_case(const ParamVec *cases, const char *name) {
+  if (!name || !name[0]) return NULL;
   for (size_t i = 0; i < cases->len; i++) {
-    if (strcmp(cases->items[i].name, name) == 0) return &cases->items[i];
+    if (cases->items[i].name[0] == name[0] && strcmp(cases->items[i].name, name) == 0) return &cases->items[i];
   }
   return NULL;
 }
 
 static const Param *find_shape_field(const Shape *shape, const char *name) {
+  if (!shape || !name || !name[0]) return NULL;
   for (size_t i = 0; i < shape->fields.len; i++) {
-    if (strcmp(shape->fields.items[i].name, name) == 0) return &shape->fields.items[i];
+    if (shape->fields.items[i].name[0] == name[0] && strcmp(shape->fields.items[i].name, name) == 0) return &shape->fields.items[i];
   }
   return NULL;
 }
@@ -4362,9 +4364,9 @@ static bool check_meta_expr(CheckContext *ctx, const Program *program, const Exp
 }
 
 static const Function *find_shape_method_decl(const Shape *shape, const char *name) {
-  if (!shape || !name) return NULL;
+  if (!shape || !name || !name[0]) return NULL;
   for (size_t i = 0; i < shape->methods.len; i++) {
-    if (strcmp(shape->methods.items[i].name, name) == 0) return &shape->methods.items[i];
+    if (shape->methods.items[i].name[0] == name[0] && strcmp(shape->methods.items[i].name, name) == 0) return &shape->methods.items[i];
   }
   return NULL;
 }
@@ -4941,17 +4943,17 @@ static bool build_shape_method_bindings(CheckContext *ctx, const Program *progra
 }
 
 static const InterfaceDecl *find_interface(const Program *program, const char *name) {
-  if (!program || !name) return NULL;
+  if (!program || !name || !name[0]) return NULL;
   for (size_t i = 0; i < program->interfaces.len; i++) {
-    if (strcmp(program->interfaces.items[i].name, name) == 0) return &program->interfaces.items[i];
+    if (program->interfaces.items[i].name[0] == name[0] && strcmp(program->interfaces.items[i].name, name) == 0) return &program->interfaces.items[i];
   }
   return NULL;
 }
 
 static const Function *find_interface_method_decl(const InterfaceDecl *interface, const char *name) {
-  if (!interface || !name) return NULL;
+  if (!interface || !name || !name[0]) return NULL;
   for (size_t i = 0; i < interface->methods.len; i++) {
-    if (strcmp(interface->methods.items[i].name, name) == 0) return &interface->methods.items[i];
+    if (interface->methods.items[i].name[0] == name[0] && strcmp(interface->methods.items[i].name, name) == 0) return &interface->methods.items[i];
   }
   return NULL;
 }
@@ -12378,7 +12380,7 @@ static bool is_builtin_type_name(const char *name) {
     NULL
   };
   for (size_t i = 0; names[i]; i++) {
-    if (strcmp(name, names[i]) == 0) return true;
+    if (names[i][0] == name[0] && strcmp(name, names[i]) == 0) return true;
   }
   return is_int_type(name) || is_float_type(name);
 }
@@ -12432,9 +12434,7 @@ static const char *visible_concrete_type_name_kind(const Program *program, const
   if (find_enum(program, name)) return "enum";
   if (find_choice(program, name)) return "choice";
   if (find_alias(program, name)) return "type alias";
-  for (size_t i = 0; i < program->interfaces.len; i++) {
-    if (strcmp(program->interfaces.items[i].name, name) == 0) return "interface";
-  }
+  if (find_interface(program, name)) return "interface";
   return NULL;
 }
 
@@ -12499,9 +12499,7 @@ static bool program_type_name_known(const Program *program, const ParamVec *prim
   if (allow_self && strcmp(name, "Self") == 0) return true;
   if (is_builtin_type_name(name) || type_param_name_known(primary, secondary, name)) return true;
   if (find_shape(program, name) || find_enum(program, name) || find_choice(program, name) || find_alias(program, name)) return true;
-  for (size_t i = 0; program && i < program->interfaces.len; i++) {
-    if (strcmp(program->interfaces.items[i].name, name) == 0) return true;
-  }
+  if (find_interface(program, name)) return true;
   return false;
 }
 
