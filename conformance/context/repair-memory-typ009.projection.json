@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "kind": "repair-memory",
+  "nodeId": "ctx:repair-memory:typ009:make-binding-mutable",
+  "sourceAnchor": {
+    "path": "conformance/native/fail/mem-copy-immutable-dst.0",
+    "range": {
+      "start": {
+        "line": 2,
+        "column": 5
+      },
+      "end": {
+        "line": 2,
+        "column": 8
+      },
+      "columnUnit": "utf8-byte"
+    },
+    "sourceHash": null,
+    "status": "unchecked"
+  },
+  "codes": [
+    "DIAGNOSTIC_REPAIR",
+    "MUTABLE_BINDING_REQUIRED",
+    "BEHAVIOR_PRESERVING_EDIT"
+  ],
+  "diagnosticCode": "TYP009",
+  "repairId": "make-binding-mutable",
+  "residualSummary": "An immutable array binding cannot be passed to a mutable span API; make the root binding mutable before creating the mutable view.",
+  "parents": [],
+  "projection": {
+    "kind": "context-projection",
+    "frontier": {
+      "diagnostics": [
+        "TYP009"
+      ],
+      "repairs": [
+        "make-binding-mutable"
+      ],
+      "edits": [
+        {
+          "oldText": "let",
+          "newText": "let mut",
+          "precondition": {
+            "kind": "exact-text",
+            "text": "let"
+          }
+        }
+      ]
+    }
+  }
+}
