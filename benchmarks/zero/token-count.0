@@ -1,0 +1,21 @@
+pub fun main(world: World) -> Void raises {
+    let input = "hello world foo bar baz"
+    let span = input[0..23]
+    let mut tokens: i32 = 1
+    let mut index: usize = 0
+    let mut outer: usize = 0
+    while outer < 50000 {
+        tokens = 1
+        index = 0
+        while index < 23 {
+            if span[index] == (' ' as u8) {
+                tokens = tokens + 1
+            }
+            index = index + 1
+        }
+        outer = outer + 1
+    }
+    if tokens == 5 {
+        check world.out.write("token-count\n")
+    }
+}

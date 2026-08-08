@@ -1,0 +1,25 @@
+fun safeDivide(a: i32, b: i32) -> i32 raises { DivByZero } {
+    if b == 0 {
+        raise DivByZero
+    }
+    return a / b
+}
+
+pub fun main(world: World) -> Void raises {
+    let mut i = 0
+    let mut successes = 0
+    let mut rescued = 0
+    while i < 50000 {
+        let divisor = i % 5
+        let result = safeDivide(100, divisor) rescue err { 0 }
+        if divisor == 0 {
+            rescued = rescued + 1
+        } else {
+            successes = successes + result
+        }
+        i = i + 1
+    }
+    if rescued == 10000 && successes > 0 {
+        check world.out.write("safe-div\n")
+    }
+}

@@ -1,0 +1,29 @@
+pub fun main(world: World) -> Void raises {
+    let data: [8]i32 = [12, 7, 45, 3, 99, 23, 1, 56]
+    let mut min: i32 = data[0]
+    let mut max: i32 = data[0]
+    let mut sum: i32 = 0
+    let mut index: usize = 0
+    let mut outer: usize = 0
+    while outer < 50000 {
+        min = data[0]
+        max = data[0]
+        sum = 0
+        index = 0
+        while index < 8 {
+            let value = data[index]
+            sum = sum + value
+            if value < min {
+                min = value
+            }
+            if value > max {
+                max = value
+            }
+            index = index + 1
+        }
+        outer = outer + 1
+    }
+    if min == 1 && max == 99 && sum == 246 {
+        check world.out.write("stats\n")
+    }
+}
