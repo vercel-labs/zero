@@ -1857,6 +1857,16 @@ envelopes for handler checks without opening a socket.
 For a runnable local API server, define a same-module handler and call
 `std.http.listen(world)` from `main`. The handler signature is
 `fn handle(request: Span<u8>, response: MutSpan<u8>) -> Maybe<Span<u8>>`.
+The response span is fixed caller-owned storage; writers do not stream. The
+listener accepts at most 65,536 bytes for the complete serialized HTTP
+response: status line, headers, CRLF separators, `content-length` metadata, and
+body. Bounded response writers return `Maybe.none` when input is invalid or
+caller storage is insufficient. A listener `Maybe.none` is reported as HTTP
+500 `{"error":"response_unavailable"}`; malformed output, handler process
+failure, and capture overflow are reported as `response_invalid`,
+`handler_failed`, and `response_too_large`. Listener errors include
+`connection: close`. This fixed cap does not provide streaming or unbounded
+responses.
 When no port is passed, `std.http.listen(world)` starts at development port
 `3000` and increments by one until it finds a free loopback port. It prints the
 actual URL, such as `listening on http://127.0.0.1:3001`; use that printed port

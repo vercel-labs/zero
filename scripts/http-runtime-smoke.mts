@@ -12,6 +12,8 @@ const execFileAsync = promisify(execFile);
 const zero = "bin/zero";
 const outDir = ".zero/native-test";
 const zeroRunTimeoutMs = 20000;
+// Must match Z_HTTP_LISTEN_RESPONSE_LIMIT in native/zero-c/src/http_listen_runner.c.
+const httpListenResponseLimit = 65536;
 const target =
   process.platform === "darwin" && process.arch === "arm64" ? "darwin-arm64" :
   process.platform === "linux" && process.arch === "x64" ? "linux-x64" :
@@ -284,36 +286,95 @@ end
   }
 }
 
+async function createHttpListenFixture() {
+  const dir = await mkdtemp("/tmp/zero-http-listen-capacity-");
+  const packageDir = `${dir}/ping-pong-api`;
+  const patchPath = `${dir}/capacity.patch`;
+  const eightKiBBody = "x".repeat(8192);
+  try {
+    await cp("examples/ping-pong-api", packageDir, { recursive: true });
+    await writeFile(patchPath, `zero-program-graph-patch v1
+replaceFunctionBody handle
+  if std.http.requestIsGet(request, "/large8k") {
+    return std.http.writeTextOk(response, "${eightKiBBody}")
+  }
+  if std.http.requestIsGet(request, "/too-large") {
+    let body: Maybe<Span<u8>> = std.str.repeat(response, "x", ${httpListenResponseLimit})
+    if body.has {
+      return std.http.writeTextOk(response, body.value)
+    }
+    return null
+  }
+  if std.http.requestIsGet(request, "/ping") {
+    return std.http.writeJsonOk(response, "{\\"message\\":\\"pong\\"}")
+  }
+  if std.http.requestIsGet(request, "/health") {
+    return std.http.writeJsonOk(response, "{\\"ok\\":true}")
+  }
+  if std.http.requestIsPost(request, "/echo") {
+    let body: Maybe<Span<u8>> = std.http.requestJsonBodyWithin(request, 128)
+    if body.has {
+      return std.http.writeJsonCreated(response, body.value)
+    }
+    return std.http.writeJsonBadRequest(response, "{\\"error\\":\\"bad_request\\"}")
+  }
+  return std.http.writeJsonNotFound(response, "{\\"error\\":\\"not_found\\"}")
+end
+`);
+    await execFileAsync(zero, ["patch", packageDir, patchPath], { timeout: zeroRunTimeoutMs, maxBuffer: 2 * 1024 * 1024 });
+    return { dir, packageDir };
+  } catch (error) {
+    await rm(dir, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 async function runHttpListenExample() {
   const tempDirsBefore = new Set((await readdir("/tmp")).filter((entry) => entry.startsWith("zero-listen-")));
+  let fixture = null;
   let reserved3000 = null;
   let port3000Occupied = false;
   const devPortGuard = createTcpServer();
+  let child = null;
   try {
-    await listenOn(devPortGuard, 3000);
-    reserved3000 = devPortGuard;
-    port3000Occupied = true;
-  } catch (error) {
+    fixture = await createHttpListenFixture();
     try {
-      devPortGuard.close();
-    } catch {
-      // The guard may never have started if another local service owns 3000.
-    }
-    if (error && error.code === "EADDRINUSE") {
+      await listenOn(devPortGuard, 3000);
+      reserved3000 = devPortGuard;
       port3000Occupied = true;
-    } else {
-      throw error;
+    } catch (error) {
+      try {
+        devPortGuard.close();
+      } catch {
+        // The guard may never have started if another local service owns 3000.
+      }
+      if (error && error.code === "EADDRINUSE") {
+        port3000Occupied = true;
+      } else {
+        throw error;
+      }
     }
-  }
 
-  const child = spawn(zero, ["run", "examples/ping-pong-api"], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  try {
+    child = spawn(zero, ["run", fixture.packageDir], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const { port } = await waitForZeroListener(child);
     if (port3000Occupied) {
       assert.notEqual(port, 3000);
     }
+    assert.deepEqual(await requestZeroListener(port, "GET", "/ping"), {
+      status: 200,
+      body: "{\"message\":\"pong\"}",
+    });
+    const largeResponse = await requestZeroListener(port, "GET", "/large8k");
+    assert.equal(largeResponse.status, 200);
+    assert.equal(largeResponse.body, "x".repeat(8192));
+    const tooLargeResponse = await requestZeroListener(port, "GET", "/too-large");
+    assert.deepEqual(tooLargeResponse, {
+      status: 500,
+      body: "{\"error\":\"response_unavailable\"}",
+    });
+    assert(!tooLargeResponse.body.includes("x"), "over-limit listener response must not leak a partial body");
     assert.deepEqual(await requestZeroListener(port, "GET", "/ping"), {
       status: 200,
       body: "{\"message\":\"pong\"}",
@@ -346,9 +407,10 @@ async function runHttpListenExample() {
     assert.match(incomplete, /\{"error":"request_timeout"\}/);
     if (port3000Occupied) await assertExplicitPortConflict();
   } finally {
-    await stopZeroListener(child);
+    if (child) await stopZeroListener(child);
     if (reserved3000) await close(reserved3000);
     const tempDirsAfter = (await readdir("/tmp")).filter((entry) => entry.startsWith("zero-listen-"));
+    if (fixture) await rm(fixture.dir, { recursive: true, force: true });
     for (const entry of tempDirsAfter) {
       assert(tempDirsBefore.has(entry), `std.http.listen leaked temporary directory /tmp/${entry}`);
     }

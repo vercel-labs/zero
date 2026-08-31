@@ -40,7 +40,7 @@ const fileBudgets: Record<string, FileBudget> = {
   "native/zero-c/src/checker.c": { maxLines: 12928, maxStrcmpCalls: 298 },
   "native/zero-c/src/cli_help.c": { maxLines: 195, maxStrcmpCalls: 1 },
   "native/zero-c/src/cli_help.h": { maxLines: 8, maxStrcmpCalls: 0 },
-  "native/zero-c/src/http_listen_runner.c": { maxLines: 600, maxStrcmpCalls: 0 },
+  "native/zero-c/src/http_listen_runner.c": { maxLines: 640, maxStrcmpCalls: 0 },
   "native/zero-c/src/http_listen_runner.h": { maxLines: 22, maxStrcmpCalls: 0 },
   "native/zero-c/src/http_listen_temp.c": { maxLines: 200, maxStrcmpCalls: 0 },
   "native/zero-c/src/http_listen_temp.h": { maxLines: 15, maxStrcmpCalls: 0 },
@@ -1668,7 +1668,7 @@ const stdSourceRaw = texts.get("native/zero-c/src/std_source.c") ?? "";
 const stdSourceGraphFingerprintBody = cCodeText(cBlock(stdSourceRaw, "uint64_t z_std_source_graph_fingerprint"));
 const listenSendAllBody = cCodeText(cBlock(httpListenRunnerRaw, "static bool send_all"));
 const listenJsonErrorBody = cCodeText(cBlock(httpListenRunnerRaw, "static bool send_json_error"));
-const listenHandlerCaptureBody = cCodeText(cBlock(httpListenRunnerRaw, "static bool run_handler_capture"));
+const listenHandlerCaptureBody = cCodeText(cBlock(httpListenRunnerRaw, "static ZHttpListenHandlerOutcome run_handler_capture"));
 const mirBinaryRaw = texts.get("native/zero-c/src/mir_binary.c") ?? "";
 const mirBinarySource = cCodeText(mirBinaryRaw);
 const graphStoreMirCachePathBody = cCodeText(cBlock(mirBinaryRaw, "char *z_mir_binary_cache_path_for_graph_store"));
@@ -1947,11 +1947,16 @@ const backendFormats = {
     jsonErrorNoTruncation: /static\s+bool\s+send_json_error\s*\(/.test(httpListenRunnerRaw) &&
       /len\s*<\s*0\s*\|\|\s*\(size_t\)\s*len\s*>=\s*sizeof\s*\(\s*response\s*\)/.test(listenJsonErrorBody) &&
       /return\s+send_all\s*\(\s*fd\s*,\s*response\s*,\s*\(size_t\)\s*len\s*\)/.test(listenJsonErrorBody),
-    handlerCaptureStrict: /bool\s+read_ok\s*=\s*true/.test(listenHandlerCaptureBody) &&
+    handlerCaptureStrict: /ZHttpListenHandlerOutcome\s+run_handler_capture\s*\(/.test(httpListenRunnerRaw) &&
+      /Z_HTTP_LISTEN_RESPONSE_LIMIT/.test(httpListenRunnerRaw) &&
       /read_ok\s*=\s*false/.test(listenHandlerCaptureBody) &&
       /bool\s+handler_ok\s*=\s*WIFEXITED\s*\(\s*status\s*\)\s*&&\s*WEXITSTATUS\s*\(\s*status\s*\)\s*==\s*0/.test(httpListenRunnerRaw) &&
-      /memcmp\s*\(\s*response\s*,\s*"HTTP\/"\s*,\s*5\s*\)\s*==\s*0/.test(httpListenRunnerRaw) &&
-      /read_ok\s*&&\s*!\s*overflow\s*&&\s*handler_ok\s*&&\s*response_ok/.test(httpListenRunnerRaw),
+      /if\s*\(\s*!read_ok\s*\|\|\s*!handler_ok\s*\)/.test(listenHandlerCaptureBody) &&
+      /Z_HTTP_LISTEN_HANDLER_RESPONSE_TOO_LARGE/.test(listenHandlerCaptureBody) &&
+      /Z_HTTP_LISTEN_HANDLER_RESPONSE_UNAVAILABLE/.test(listenHandlerCaptureBody) &&
+      /memcmp\s*\(\s*response\s*,\s*"HTTP\/"\s*,\s*5\s*\)\s*!=\s*0/.test(httpListenRunnerRaw) &&
+      /Z_HTTP_LISTEN_NO_RESPONSE_MARKER/.test(httpListenRunnerRaw) &&
+      /return\s+Z_HTTP_LISTEN_HANDLER_RESPONSE_INVALID/.test(listenHandlerCaptureBody),
     tempDirWindowsPortable: /#include\s*<direct\.h>/.test(httpListenTempRaw) &&
       /#include\s*<process\.h>/.test(httpListenTempRaw) &&
       /listen_create_unique_temp_dir/.test(httpListenTempRaw) &&
@@ -1963,7 +1968,11 @@ const backendFormats = {
     nativeSmokeWired: /http_listen_runner_smoke\.c/.test(nativeTestRaw) &&
       /http-listen-runner-smoke/.test(nativeTestRaw) &&
       /smoke_json_error/.test(httpListenRunnerSmokeRaw) &&
-      /smoke_handler_capture/.test(httpListenRunnerSmokeRaw),
+      /smoke_handler_capture/.test(httpListenRunnerSmokeRaw) &&
+      /Z_HTTP_LISTEN_HANDLER_RESPONSE_TOO_LARGE/.test(httpListenRunnerSmokeRaw) &&
+      /Z_HTTP_LISTEN_HANDLER_RESPONSE_UNAVAILABLE/.test(httpListenRunnerSmokeRaw) &&
+      /Z_HTTP_LISTEN_HANDLER_RESPONSE_INVALID/.test(httpListenRunnerSmokeRaw) &&
+      /Z_HTTP_LISTEN_HANDLER_PROCESS_FAILED/.test(httpListenRunnerSmokeRaw),
   },
   targetManifest: {
     exactKeyMatcher: /\bmanifest_key_equals\s*\(/.test(targetSource),

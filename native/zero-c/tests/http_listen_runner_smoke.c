@@ -207,6 +207,36 @@ static int write_literal_file(const char *path, const char *text, mode_t mode) {
   return 0;
 }
 
+static int write_response_handler(const char *path, size_t body_len, int exit_code) {
+  int header_len = snprintf(NULL, 0, "HTTP/1.1 200 OK\r\ncontent-length: %zu\r\n\r\n", body_len);
+  if (header_len < 0) return fail("format response fixture failed");
+  size_t cap = (size_t)header_len + 256;
+  char *script = z_checked_malloc(cap);
+  int written = snprintf(script, cap,
+                         "#!/bin/sh\nprintf 'HTTP/1.1 200 OK\\r\\ncontent-length: %zu\\r\\n\\r\\n'\ni=0\nwhile [ \"$i\" -lt %zu ]; do printf x; i=$((i + 1)); done\nexit %d\n",
+                         body_len, body_len, exit_code);
+  int status = 0;
+  if (written < 0 || (size_t)written >= cap) status = fail("format response fixture truncated");
+  else status = write_literal_file(path, script, 0700);
+  free(script);
+  return status;
+}
+
+static int smoke_handler_outcome(const char *handler_path, const char *request_path, ZHttpListenHandlerOutcome expected, size_t expected_len) {
+  char *response = NULL;
+  size_t response_len = 0;
+  ZHttpListenHandlerOutcome outcome = run_handler_capture(handler_path, request_path, &response, &response_len);
+  int status = expect_true(outcome == expected, "handler capture outcome mismatch");
+  if (expected == Z_HTTP_LISTEN_HANDLER_OK) {
+    status |= expect_true(response != NULL && response_len == expected_len, "accepted handler response length mismatch");
+    status |= expect_true(response_len >= 5 && memcmp(response, "HTTP/", 5) == 0, "accepted handler response should be HTTP");
+  } else {
+    status |= expect_true(response == NULL && response_len == 0, "rejected handler should not return response");
+  }
+  free(response);
+  return status;
+}
+
 static int smoke_write_request_file(void) {
   char dir[] = "/tmp/zero-listen-runner-smoke-XXXXXX";
   if (!mkdtemp(dir)) return fail("mkdtemp failed");
@@ -233,30 +263,55 @@ static int smoke_handler_capture(void) {
   if (!mkdtemp(dir)) return fail("mkdtemp handler failed");
   char request_path[256];
   char ok_handler[256];
-  char bad_handler[256];
+  char exact_handler[256];
+  char oversized_handler[256];
+  char unavailable_handler[256];
+  char malformed_handler[256];
+  char failed_handler[256];
   snprintf(request_path, sizeof(request_path), "%s/request.http", dir);
   snprintf(ok_handler, sizeof(ok_handler), "%s/ok-handler", dir);
-  snprintf(bad_handler, sizeof(bad_handler), "%s/bad-handler", dir);
+  snprintf(exact_handler, sizeof(exact_handler), "%s/exact-handler", dir);
+  snprintf(oversized_handler, sizeof(oversized_handler), "%s/oversized-handler", dir);
+  snprintf(unavailable_handler, sizeof(unavailable_handler), "%s/unavailable-handler", dir);
+  snprintf(malformed_handler, sizeof(malformed_handler), "%s/malformed-handler", dir);
+  snprintf(failed_handler, sizeof(failed_handler), "%s/failed-handler", dir);
   int status = 0;
   status |= write_literal_file(request_path, "GET /ping\r\n\r\n", 0600);
-  status |= write_literal_file(ok_handler, "#!/bin/sh\nprintf 'HTTP/1.1 200 OK\\r\\ncontent-length: 2\\r\\n\\r\\nok'\n", 0700);
-  status |= write_literal_file(bad_handler, "#!/bin/sh\nprintf 'not http'\n", 0700);
-  chmod(ok_handler, 0700);
-  chmod(bad_handler, 0700);
+  status |= write_response_handler(ok_handler, 8192, 0);
 
-  char *response = NULL;
-  size_t response_len = 0;
-  status |= expect_true(run_handler_capture(ok_handler, request_path, &response, &response_len), "handler capture should accept HTTP response");
-  status |= expect_true(response && response_len >= 17 && memcmp(response, "HTTP/1.1 200 OK", 15) == 0, "handler capture response mismatch");
-  free(response);
-  response = NULL;
-  response_len = 0;
-  status |= expect_true(!run_handler_capture(bad_handler, request_path, &response, &response_len), "handler capture should reject non-HTTP response");
-  status |= expect_true(response == NULL && response_len == 0, "rejected handler should not return response");
+  size_t exact_body_len = Z_HTTP_LISTEN_RESPONSE_LIMIT;
+  for (;;) {
+    int header_len = snprintf(NULL, 0, "HTTP/1.1 200 OK\r\ncontent-length: %zu\r\n\r\n", exact_body_len);
+    if (header_len < 0 || (size_t)header_len > Z_HTTP_LISTEN_RESPONSE_LIMIT) {
+      status |= fail("exact response header length failed");
+      break;
+    }
+    size_t next_body_len = Z_HTTP_LISTEN_RESPONSE_LIMIT - (size_t)header_len;
+    if (next_body_len == exact_body_len) break;
+    exact_body_len = next_body_len;
+  }
+  status |= write_response_handler(exact_handler, exact_body_len, 0);
+  status |= write_response_handler(oversized_handler, exact_body_len + 1, 0);
+  status |= write_literal_file(unavailable_handler, "#!/bin/sh\nprintf '" Z_HTTP_LISTEN_NO_RESPONSE_MARKER "\\n'\n", 0700);
+  status |= write_literal_file(malformed_handler, "#!/bin/sh\nprintf 'not http'\n", 0700);
+  status |= write_response_handler(failed_handler, 2, 7);
+
+  int normal_header_len = snprintf(NULL, 0, "HTTP/1.1 200 OK\r\ncontent-length: %zu\r\n\r\n", (size_t)8192);
+  status |= smoke_handler_outcome(ok_handler, request_path, Z_HTTP_LISTEN_HANDLER_OK,
+                                  (size_t)normal_header_len + 8192);
+  status |= smoke_handler_outcome(exact_handler, request_path, Z_HTTP_LISTEN_HANDLER_OK, Z_HTTP_LISTEN_RESPONSE_LIMIT);
+  status |= smoke_handler_outcome(oversized_handler, request_path, Z_HTTP_LISTEN_HANDLER_RESPONSE_TOO_LARGE, 0);
+  status |= smoke_handler_outcome(unavailable_handler, request_path, Z_HTTP_LISTEN_HANDLER_RESPONSE_UNAVAILABLE, 0);
+  status |= smoke_handler_outcome(malformed_handler, request_path, Z_HTTP_LISTEN_HANDLER_RESPONSE_INVALID, 0);
+  status |= smoke_handler_outcome(failed_handler, request_path, Z_HTTP_LISTEN_HANDLER_PROCESS_FAILED, 0);
 
   unlink(request_path);
   unlink(ok_handler);
-  unlink(bad_handler);
+  unlink(exact_handler);
+  unlink(oversized_handler);
+  unlink(unavailable_handler);
+  unlink(malformed_handler);
+  unlink(failed_handler);
   rmdir(dir);
   return status;
 }

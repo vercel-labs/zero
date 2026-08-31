@@ -49,9 +49,21 @@ int z_http_listen_run(const ZHttpListenRunConfig *config, ZDiag *diag) {
 #endif
 
 #define Z_HTTP_LISTEN_REQUEST_CAP 4096
-#define Z_HTTP_LISTEN_RESPONSE_CAP 262144
-#define Z_HTTP_LISTEN_HANDLER_RESPONSE_CAP 4096
+/* The serialized response contract includes the status line, headers, CRLF
+ * separators, content-length metadata, and body. The generated handler and
+ * parent capture use this same fixed capacity; the parent adds one byte only
+ * for C termination. */
+#define Z_HTTP_LISTEN_RESPONSE_LIMIT 65536
+#define Z_HTTP_LISTEN_NO_RESPONSE_MARKER "ZERO_HTTP_LISTEN_RESPONSE_UNAVAILABLE"
 #define Z_HTTP_LISTEN_CLIENT_TIMEOUT_SECONDS 2
+
+typedef enum {
+  Z_HTTP_LISTEN_HANDLER_OK,
+  Z_HTTP_LISTEN_HANDLER_PROCESS_FAILED,
+  Z_HTTP_LISTEN_HANDLER_RESPONSE_INVALID,
+  Z_HTTP_LISTEN_HANDLER_RESPONSE_TOO_LARGE,
+  Z_HTTP_LISTEN_HANDLER_RESPONSE_UNAVAILABLE,
+} ZHttpListenHandlerOutcome;
 
 static volatile sig_atomic_t listen_stop_requested = 0;
 static volatile sig_atomic_t listen_server_fd_for_signal = -1;
@@ -170,12 +182,15 @@ static bool build_handler_graph(const ZHttpListenRunConfig *config, const char *
   zbuf_append(&patch, "    check world.err.write \"http request read failed\\n\"\n");
   zbuf_append(&patch, "    return\n");
   zbuf_append(&patch, "  let request_span Span<u8> = request[..maybe_request_len.value]\n");
-  zbuf_appendf(&patch, "  var response [%" PRIu64 "]u8 = [0_u8; %" PRIu64 "]\n", (uint64_t)Z_HTTP_LISTEN_HANDLER_RESPONSE_CAP, (uint64_t)Z_HTTP_LISTEN_HANDLER_RESPONSE_CAP);
+  zbuf_appendf(&patch, "  var response [%" PRIu64 "]u8 = [0_u8; %" PRIu64 "]\n", (uint64_t)Z_HTTP_LISTEN_RESPONSE_LIMIT, (uint64_t)Z_HTTP_LISTEN_RESPONSE_LIMIT);
   zbuf_appendf(&patch, "  let output Maybe<Span<u8>> = %s(request_span, response)\n", config->handler);
   zbuf_append(&patch, "  if output.has\n");
   zbuf_append(&patch, "    check world.out.write output.value\n");
   zbuf_append(&patch, "    return\n");
-  zbuf_append(&patch, "  check world.err.write \"http handler failed\\n\"\n");
+  /* Maybe.none remains the std.http writer signal for invalid response input
+   * or insufficient caller storage. Keep a private marker on stdout so the
+   * listener can report response_unavailable instead of process failure. */
+  zbuf_appendf(&patch, "  check world.out.write \"%s\\n\"\n", Z_HTTP_LISTEN_NO_RESPONSE_MARKER);
   zbuf_append(&patch, "end\n");
 
   bool wrote_patch = z_write_file(patch_path, patch.data ? patch.data : "", diag);
@@ -373,12 +388,12 @@ static bool write_request_file(const char *path, const char *request, size_t req
   return true;
 }
 
-static bool run_handler_capture(const char *handler_exe, const char *request_path, char **out_data, size_t *out_len) {
+static ZHttpListenHandlerOutcome run_handler_capture(const char *handler_exe, const char *request_path, char **out_data, size_t *out_len) {
   if (out_data) *out_data = NULL;
   if (out_len) *out_len = 0;
-  if (!handler_exe || !request_path) return false;
+  if (!handler_exe || !request_path) return Z_HTTP_LISTEN_HANDLER_PROCESS_FAILED;
   int fds[2];
-  if (pipe(fds) != 0) return false;
+  if (pipe(fds) != 0) return Z_HTTP_LISTEN_HANDLER_PROCESS_FAILED;
   pid_t pid = fork();
   if (pid == 0) {
     if (close(fds[0]) != 0) _exit(127);
@@ -392,10 +407,10 @@ static bool run_handler_capture(const char *handler_exe, const char *request_pat
   close(fds[1]);
   if (pid < 0) {
     close(fds[0]);
-    return false;
+    return Z_HTTP_LISTEN_HANDLER_PROCESS_FAILED;
   }
 
-  char *response = z_checked_malloc(Z_HTTP_LISTEN_RESPONSE_CAP + 1);
+  char *response = z_checked_malloc(Z_HTTP_LISTEN_RESPONSE_LIMIT + 1);
   size_t len = 0;
   bool overflow = false;
   bool read_ok = true;
@@ -409,10 +424,7 @@ static bool run_handler_capture(const char *handler_exe, const char *request_pat
     }
     if (n == 0) break;
     size_t count = (size_t)n;
-    if (count > Z_HTTP_LISTEN_RESPONSE_CAP - len) {
-      size_t remaining = Z_HTTP_LISTEN_RESPONSE_CAP - len;
-      if (remaining > 0) memcpy(response + len, chunk, remaining);
-      len = Z_HTTP_LISTEN_RESPONSE_CAP;
+    if (overflow || len >= Z_HTTP_LISTEN_RESPONSE_LIMIT || count > Z_HTTP_LISTEN_RESPONSE_LIMIT - len) {
       overflow = true;
     } else {
       memcpy(response + len, chunk, count);
@@ -426,19 +438,41 @@ static bool run_handler_capture(const char *handler_exe, const char *request_pat
   while (waitpid(pid, &status, 0) < 0) {
     if (errno == EINTR) continue;
     free(response);
-    return false;
+    return Z_HTTP_LISTEN_HANDLER_PROCESS_FAILED;
   }
   bool handler_ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
-  bool response_ok = len >= 5 && memcmp(response, "HTTP/", 5) == 0;
-  bool ok = read_ok && !overflow && handler_ok && response_ok;
-  if (!ok) {
+  if (!read_ok || !handler_ok) {
     free(response);
-    return false;
+    return Z_HTTP_LISTEN_HANDLER_PROCESS_FAILED;
+  }
+  if (overflow) {
+    free(response);
+    return Z_HTTP_LISTEN_HANDLER_RESPONSE_TOO_LARGE;
+  }
+  const char marker[] = Z_HTTP_LISTEN_NO_RESPONSE_MARKER "\n";
+  if (len == sizeof(marker) - 1 && memcmp(response, marker, sizeof(marker) - 1) == 0) {
+    free(response);
+    return Z_HTTP_LISTEN_HANDLER_RESPONSE_UNAVAILABLE;
+  }
+  if (len < 5 || memcmp(response, "HTTP/", 5) != 0) {
+    free(response);
+    return Z_HTTP_LISTEN_HANDLER_RESPONSE_INVALID;
   }
   if (out_data) *out_data = response;
   else free(response);
   if (out_len) *out_len = len;
-  return true;
+  return Z_HTTP_LISTEN_HANDLER_OK;
+}
+
+static const char *handler_outcome_error_name(ZHttpListenHandlerOutcome outcome) {
+  switch (outcome) {
+    case Z_HTTP_LISTEN_HANDLER_PROCESS_FAILED: return "handler_failed";
+    case Z_HTTP_LISTEN_HANDLER_RESPONSE_INVALID: return "response_invalid";
+    case Z_HTTP_LISTEN_HANDLER_RESPONSE_TOO_LARGE: return "response_too_large";
+    case Z_HTTP_LISTEN_HANDLER_RESPONSE_UNAVAILABLE: return "response_unavailable";
+    case Z_HTTP_LISTEN_HANDLER_OK: return NULL;
+  }
+  return "handler_failed";
 }
 
 static bool send_json_error(int fd, unsigned status, const char *reason, const char *body) {
@@ -559,11 +593,15 @@ int z_http_listen_run(const ZHttpListenRunConfig *config, ZDiag *diag) {
     }
     char *response = NULL;
     size_t response_len = 0;
-    if (run_handler_capture(handler_exe, request_path, &response, &response_len)) {
+    ZHttpListenHandlerOutcome outcome = run_handler_capture(handler_exe, request_path, &response, &response_len);
+    if (outcome == Z_HTTP_LISTEN_HANDLER_OK) {
       (void)send_all(client_fd, response, response_len);
       free(response);
     } else {
-      send_json_error(client_fd, 500, "Internal Server Error", "{\"error\":\"handler_failed\"}");
+      const char *error_name = handler_outcome_error_name(outcome);
+      char error_body[96];
+      snprintf(error_body, sizeof(error_body), "{\"error\":\"%s\"}", error_name ? error_name : "handler_failed");
+      send_json_error(client_fd, 500, "Internal Server Error", error_body);
     }
     unlink(request_path);
     close(client_fd);
