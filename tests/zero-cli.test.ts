@@ -20,7 +20,7 @@ const supportedTargets = [
   "win32-x64.exe",
   "win32-arm64.exe",
 ];
-const artifactSummaryPattern = /\((?:\d+ B|\d+\.\d KiB|\d+\.\d MiB|\d+\.\d GiB), (?:\d+ ms|\d+\.\d s)\)/;
+const artifactSummaryPattern = /\((\d+ B|\d+\.\d KiB|\d+\.\d MiB|\d+\.\d GiB), (\d+ ms|\d+\.\d s)\)/;
 const runnableDirectTarget =
   process.platform === "darwin" && process.arch === "arm64" ? "darwin-arm64" :
   process.platform === "linux" && process.arch === "x64" ? "linux-musl-x64" :
@@ -278,5 +278,64 @@ describe("native zero CLI", () => {
     const diagnostic = JSON.parse(result.stdout).diagnostics[0];
     assert.equal(diagnostic.code, "BLD004");
     assert.match(diagnostic.help, /use zero check/);
+  });
+
+  it("covers fix-plan repair safety metadata and agent-facing TYP009 contract", async () => {
+    const plan = JSON.parse((await runZero(["fix", "--plan", "--json", "examples/agent-repair-demo/broken.0"])).stdout);
+    assert.equal(plan.ok, false);
+    assert.equal(plan.mode, "plan");
+    assert.equal(plan.appliesEdits, false);
+    assert.equal(plan.schemaVersion, 1);
+
+    // Verify diagnostics array has the expected error
+    assert.equal(plan.diagnostics.length, 1);
+    assert.equal(plan.diagnostics[0].code, "TYP009");
+    assert.equal(plan.diagnostics[0].fixSafety, "behavior-preserving");
+    assert.equal(plan.diagnostics[0].repair.id, "make-binding-mutable");
+
+    // Verify fixes array preserves repair metadata
+    assert.equal(plan.fixes.length, 1);
+    assert.equal(plan.fixes[0].id, "make-binding-mutable");
+    assert.equal(plan.fixes[0].diagnosticCode, "TYP009");
+    assert.equal(plan.fixes[0].safety, "behavior-preserving");
+    assert.equal(plan.fixes[0].appliesEdits, false);
+
+    // Verify the plan remains non-applying
+    assert.equal(plan.appliesEdits, false);
+  });
+
+  it("covers target capability facts in zero targets", async () => {
+    const targets = JSON.parse((await runZero(["targets"])).stdout);
+    assert.equal(targets.schemaVersion, 1);
+    assert.ok(targets.host.length > 0);
+
+    // Find the host target
+    const hostTarget = targets.targets.find((t: { hosted: boolean }) => t.hosted);
+    assert.ok(hostTarget, "host target should exist");
+    assert.equal(hostTarget.hosted, true);
+
+    // Host target should have process/runtime capabilities
+    assert.ok(hostTarget.capabilities.includes("proc"), "host target should have proc capability");
+    assert.ok(hostTarget.capabilities.includes("fs"), "host target should have fs capability");
+    assert.ok(hostTarget.capabilities.includes("net"), "host target should have net capability");
+
+    // Host target should have hosted process/runtime surface facts
+    const hostCapabilityNames = hostTarget.capabilityFacts.map((f: { name: string }) => f.name);
+    assert.ok(hostCapabilityNames.includes("proc"), "host target capabilityFacts should include proc");
+    assert.ok(hostCapabilityNames.includes("fs"), "host target capabilityFacts should include fs");
+
+    // Unavailable capabilities should appear with available: false
+    const webFact = hostTarget.capabilityFacts.find((f: { name: string }) => f.name === "web");
+    if (webFact) {
+      assert.equal(webFact.available, false, "web capability should be unavailable on host target");
+    }
+
+    // Find a non-host target (e.g., wasm32-wasi)
+    const wasmTarget = targets.targets.find((t: { name: string }) => t.name === "wasm32-wasi");
+    if (wasmTarget) {
+      assert.equal(wasmTarget.hosted, false, "wasm32-wasi should not be hosted");
+      // Non-host targets should not have proc capability
+      assert.ok(!wasmTarget.capabilities.includes("proc"), "wasm should not have proc");
+    }
   });
 });
