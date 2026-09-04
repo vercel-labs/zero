@@ -1,0 +1,46 @@
+// cmd_init.0 — `0pm init [name]` — create zero.json in current directory
+
+use std.mem
+use std.fs
+use std.args
+use std.env
+use std.path
+
+use manifest
+use output
+
+// Appends output to `out` and returns its length.
+pub fn runInit(out: MutSpan<u8>) -> usize {
+    let fs: Fs = std.fs.host()
+
+    // Refuse to overwrite existing zero.json
+    let existing: Maybe<owned<File>> = std.fs.open(fs, "zero.json")
+    if existing.has {
+        var ef: owned<File> = existing.value
+        std.fs.close(&mut ef)
+        return outError(out, 0, "zero.json already exists")
+    }
+
+    // Determine package name: arg[2], $PWD basename, or "my-package"
+    var name_buf: [64]u8 = [0_u8; 64]
+    var name_len: usize = 0
+    let name_arg: Maybe<String> = std.args.get(2)
+    if name_arg.has {
+        name_len = std.mem.copy(name_buf, std.mem.span(name_arg.value))
+    } else {
+        let cwd: Maybe<String> = std.env.get("PWD")
+        if cwd.has {
+            let base: String = std.path.basename(cwd.value)
+            name_len = std.mem.copy(name_buf, std.mem.span(base))
+        }
+    }
+    if name_len == 0 {
+        name_len = std.mem.copy(name_buf, "my-package")
+    }
+
+    if !writeManifestZeroJson(name_buf[..name_len], "0.1.0", "", "") {
+        return outError(out, 0, "failed to write zero.json")
+    }
+
+    return outLine(out, 0, "created zero.json")
+}

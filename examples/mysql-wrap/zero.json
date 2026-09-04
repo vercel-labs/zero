@@ -1,0 +1,25 @@
+{
+  "package": {
+    "name": "mysql-wrap",
+    "version": "0.1.0",
+    "license": "MIT"
+  },
+  "targets": {
+    "cli": {
+      "kind": "exe",
+      "main": "src/mysql.0"
+    }
+  },
+  "profiles": {
+    "dev":           { "inherits": "dev" },
+    "release-small": { "inherits": "release-small" }
+  },
+  "c": {
+    "libs": {
+      "mysql_wrap": {
+        "headers": ["c/mysql_wrap.h"],
+        "link": ["mysqlclient"]
+      }
+    }
+  }
+}

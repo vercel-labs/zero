@@ -1,0 +1,234 @@
+// jsonwalk.0 — low-level JSON object walking over byte spans
+// The direct backend lowers only functions over primitives, byte buffers,
+// spans, and Maybe, so every helper here is buffer-in/buffer-out.
+
+use std.mem
+use std.io
+use std.json
+
+// Skip whitespace in `bytes` starting at `pos`.
+pub fn skipWsAt(bytes: Span<u8>, pos: usize) -> usize {
+    var i: usize = pos
+    let len: usize = std.mem.len(bytes)
+    while i < len {
+        let b: u8 = bytes[i]
+        if b != 32_u8 && b != 9_u8 && b != 10_u8 && b != 13_u8 {
+            return i
+        }
+        i = i + 1
+    }
+    return i
+}
+
+// Find the end of a JSON string starting at `pos` (must be `"`).
+// Returns position after closing `"`, or 0 on error.
+pub fn jsonStringEnd(bytes: Span<u8>, pos: usize) -> usize {
+    let len: usize = std.mem.len(bytes)
+    if pos >= len || bytes[pos] != 34_u8 {
+        return 0
+    }
+    var i: usize = pos + 1
+    while i < len {
+        if bytes[i] == 92_u8 {
+            i = i + 2
+        } else if bytes[i] == 34_u8 {
+            return i + 1
+        } else {
+            i = i + 1
+        }
+    }
+    return 0
+}
+
+// Find the end of a JSON value starting at `pos`. Returns 0 on error.
+pub fn jsonValueEnd(bytes: Span<u8>, pos: usize) -> usize {
+    let len: usize = std.mem.len(bytes)
+    if pos >= len {
+        return 0
+    }
+    let b: u8 = bytes[pos]
+    if b == 34_u8 {
+        return jsonStringEnd(bytes, pos)
+    }
+    if b == 123_u8 || b == 91_u8 {
+        // object or array — find matching close bracket
+        var depth: i32 = 1
+        var i: usize = pos + 1
+        while i < len && depth > 0 {
+            if bytes[i] == 34_u8 {
+                let send: usize = jsonStringEnd(bytes, i)
+                if send == 0 {
+                    return 0
+                }
+                i = send
+            } else if bytes[i] == 91_u8 || bytes[i] == 123_u8 {
+                depth = depth + 1
+                i = i + 1
+            } else if bytes[i] == 93_u8 || bytes[i] == 125_u8 {
+                depth = depth - 1
+                i = i + 1
+            } else {
+                i = i + 1
+            }
+        }
+        return i
+    }
+    // number, bool, null — scan until delimiter
+    var i: usize = pos
+    while i < len {
+        let c: u8 = bytes[i]
+        if c == 32_u8 || c == 9_u8 || c == 10_u8 || c == 13_u8 || c == 44_u8 || c == 125_u8 || c == 93_u8 {
+            return i
+        }
+        i = i + 1
+    }
+    return i
+}
+
+// Decode a JSON string value (including quotes) into `buf`. Returns span or null.
+pub fn decodeStr(buf: MutSpan<u8>, raw: Span<u8>) -> Maybe<Span<u8>> {
+    let rlen: usize = std.mem.len(raw)
+    if rlen < 2 || raw[0] != 34_u8 || raw[rlen - 1] != 34_u8 {
+        return null
+    }
+    // simple copy without escape processing (ASCII paths and names)
+    let inner: Span<u8> = raw[1..rlen - 1]
+    let copied: usize = std.mem.copy(buf, inner)
+    return std.io.written(buf, copied)
+}
+
+// Count entries in a JSON object span (must start with `{`).
+pub fn countObjEntries(obj: Span<u8>) -> usize {
+    let len: usize = std.mem.len(obj)
+    if len < 2 || obj[0] != 123_u8 {
+        return 0
+    }
+    var count: usize = 0
+    var i: usize = skipWsAt(obj, 1)
+    while i < len && obj[i] != 125_u8 {
+        if obj[i] == 44_u8 {
+            i = skipWsAt(obj, i + 1)
+        }
+        if i >= len || obj[i] == 125_u8 {
+            return count
+        }
+        if obj[i] != 34_u8 {
+            return count
+        }
+        let kend: usize = jsonStringEnd(obj, i)
+        if kend == 0 {
+            return count
+        }
+        i = skipWsAt(obj, kend)
+        if i >= len || obj[i] != 58_u8 {
+            return count
+        }
+        i = skipWsAt(obj, i + 1)
+        let vend: usize = jsonValueEnd(obj, i)
+        if vend == 0 {
+            return count
+        }
+        count = count + 1
+        i = skipWsAt(obj, vend)
+    }
+    return count
+}
+
+// Position of the opening `"` of the key for entry `index`, or 0 if absent.
+fn entryKeyPos(obj: Span<u8>, index: usize) -> usize {
+    let len: usize = std.mem.len(obj)
+    if len < 2 || obj[0] != 123_u8 {
+        return 0
+    }
+    var found: usize = 0
+    var i: usize = skipWsAt(obj, 1)
+    while i < len && obj[i] != 125_u8 {
+        if obj[i] == 44_u8 {
+            i = skipWsAt(obj, i + 1)
+        }
+        if i >= len || obj[i] == 125_u8 {
+            return 0
+        }
+        if obj[i] != 34_u8 {
+            return 0
+        }
+        let kpos: usize = i
+        let kend: usize = jsonStringEnd(obj, i)
+        if kend == 0 {
+            return 0
+        }
+        i = skipWsAt(obj, kend)
+        if i >= len || obj[i] != 58_u8 {
+            return 0
+        }
+        i = skipWsAt(obj, i + 1)
+        let vend: usize = jsonValueEnd(obj, i)
+        if vend == 0 {
+            return 0
+        }
+        if found == index {
+            return kpos
+        }
+        found = found + 1
+        i = skipWsAt(obj, vend)
+    }
+    return 0
+}
+
+// Decode the key of entry `index` into `out`. Returns key length or 0.
+pub fn objKeyAt(obj: Span<u8>, index: usize, out: MutSpan<u8>) -> usize {
+    let kpos: usize = entryKeyPos(obj, index)
+    if kpos == 0 {
+        return 0
+    }
+    let kend: usize = jsonStringEnd(obj, kpos)
+    if kend == 0 {
+        return 0
+    }
+    let d: Maybe<Span<u8>> = decodeStr(out, obj[kpos..kend])
+    if !d.has {
+        return 0
+    }
+    return std.mem.len(d.value)
+}
+
+// Start position of the value of entry `index`, or 0 if absent.
+pub fn objValStartAt(obj: Span<u8>, index: usize) -> usize {
+    let kpos: usize = entryKeyPos(obj, index)
+    if kpos == 0 {
+        return 0
+    }
+    let kend: usize = jsonStringEnd(obj, kpos)
+    if kend == 0 {
+        return 0
+    }
+    var i: usize = skipWsAt(obj, kend)
+    let len: usize = std.mem.len(obj)
+    if i >= len || obj[i] != 58_u8 {
+        return 0
+    }
+    return skipWsAt(obj, i + 1)
+}
+
+// End position of the value of entry `index`, or 0 if absent.
+pub fn objValEndAt(obj: Span<u8>, index: usize) -> usize {
+    let vstart: usize = objValStartAt(obj, index)
+    if vstart == 0 {
+        return 0
+    }
+    return jsonValueEnd(obj, vstart)
+}
+
+// Decode the string field `key` of a JSON object into `out`.
+// Returns the decoded length, or 0 when absent/not a string.
+pub fn jsonStrField(body: Span<u8>, key: String, out: MutSpan<u8>) -> usize {
+    let raw: Maybe<Span<u8>> = std.json.field(body, key)
+    if !raw.has {
+        return 0
+    }
+    let d: Maybe<Span<u8>> = decodeStr(out, raw.value)
+    if !d.has {
+        return 0
+    }
+    return std.mem.len(d.value)
+}

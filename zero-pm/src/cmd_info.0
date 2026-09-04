@@ -1,0 +1,69 @@
+// cmd_info.0 — `0pm info <name>` — show package details
+
+use std.mem
+use std.fs
+use std.args
+use jsonwalk
+use lockfile
+use registry
+use output
+
+// Appends output to `out` and returns its length.
+pub fn runInfo(out: MutSpan<u8>) -> usize {
+    let fs: Fs = std.fs.host()
+
+    let name_arg: Maybe<String> = std.args.get(2)
+    if !name_arg.has {
+        return outError(out, 0, "usage: 0pm info <name>")
+    }
+    let name: Span<u8> = std.mem.span(name_arg.value)
+
+    // Check lockfile first for installed version
+    var lk_buf: [4096]u8 = [0_u8; 4096]
+    let lk_len: usize = readLockPackages(fs, ".zero/zero.lock.json", lk_buf)
+    if lk_len > 0 {
+        let pkgs: Span<u8> = lk_buf[..lk_len]
+        let idx: usize = lockFindIndex(pkgs, name)
+        if idx < lockCount(pkgs) {
+            var ver_buf: [32]u8 = [0_u8; 32]
+            let vlen: usize = lockFieldAt(pkgs, idx, "version", ver_buf)
+            var url_buf: [256]u8 = [0_u8; 256]
+            let ulen: usize = lockFieldAt(pkgs, idx, "url", url_buf)
+            var cs_buf: [80]u8 = [0_u8; 80]
+            let cslen: usize = lockFieldAt(pkgs, idx, "checksum", cs_buf)
+            var cursor: usize = 0
+            cursor = outKeyValue(out, cursor, "name", name)
+            cursor = outKeyValue(out, cursor, "version", ver_buf[..vlen])
+            cursor = outKeyValue(out, cursor, "url", url_buf[..ulen])
+            cursor = outKeyValue(out, cursor, "checksum", cs_buf[..cslen])
+            cursor = outKeyValue(out, cursor, "status", "installed")
+            return cursor
+        }
+    }
+
+    // Not in lockfile — query registry
+    var registry_buf: [128]u8 = [0_u8; 128]
+    let rlen: usize = registryUrlInto(registry_buf)
+    let registry_url: Span<u8> = registry_buf[..rlen]
+
+    var body_buf: [4096]u8 = [0_u8; 4096]
+    let blen: usize = fetchPackageBody(registry_url, name, body_buf)
+    if blen == 0 {
+        return outError(out, 0, "package not found")
+    }
+    let body: Span<u8> = body_buf[..blen]
+
+    var rname_buf: [64]u8 = [0_u8; 64]
+    let rnlen: usize = jsonStrField(body, "name", rname_buf)
+    var latest_buf: [32]u8 = [0_u8; 32]
+    let llen: usize = jsonStrField(body, "latest", latest_buf)
+    var desc_buf: [256]u8 = [0_u8; 256]
+    let dlen: usize = jsonStrField(body, "description", desc_buf)
+
+    var cursor: usize = 0
+    cursor = outKeyValue(out, cursor, "name", rname_buf[..rnlen])
+    cursor = outKeyValue(out, cursor, "latest", latest_buf[..llen])
+    cursor = outKeyValue(out, cursor, "description", desc_buf[..dlen])
+    cursor = outKeyValue(out, cursor, "status", "not installed")
+    return cursor
+}

@@ -1,0 +1,118 @@
+// cmd_update.0 — `0pm update [name]` — update one or all packages to latest
+
+use std.mem
+use std.fs
+use std.args
+use std.io
+
+use jsonwalk
+use manifest
+use registry
+use semver
+use cmd_install
+use output
+
+// Appends output to `out` and returns its length.
+pub fn runUpdate(out: MutSpan<u8>) -> usize {
+    let fs: Fs = std.fs.host()
+
+    var manifest_buf: [4096]u8 = [0_u8; 4096]
+    let mlen: usize = readManifestRaw(fs, "zero.json", manifest_buf)
+    if mlen == 0 {
+        return outError(out, 0, "zero.json not found")
+    }
+    let manifest_bytes: Span<u8> = manifest_buf[..mlen]
+
+    var deps_buf: [2048]u8 = [0_u8; 2048]
+    var deps_len: usize = manifestDepsRaw(manifest_bytes, deps_buf)
+    let dep_total: usize = countObjEntries(deps_buf[..deps_len])
+    if deps_len == 0 || dep_total == 0 {
+        return outLine(out, 0, "no dependencies to update")
+    }
+
+    var registry_buf: [128]u8 = [0_u8; 128]
+    let rlen: usize = registryUrlInto(registry_buf)
+    let registry_url: Span<u8> = registry_buf[..rlen]
+
+    // Optionally filter to a single named package
+    var filter_buf: [64]u8 = [0_u8; 64]
+    var filter_len: usize = 0
+    let filter_arg: Maybe<String> = std.args.get(2)
+    if filter_arg.has {
+        filter_len = std.mem.copy(filter_buf, std.mem.span(filter_arg.value))
+    }
+
+    // For each matching dep, fetch latest and bump the pinned version
+    var cursor: usize = 0
+    var updated: usize = 0
+    var i: usize = 0
+    while i < dep_total {
+        var name_buf: [64]u8 = [0_u8; 64]
+        let nlen: usize = depNameAt(deps_buf[..deps_len], i, name_buf)
+        var skip: Bool = nlen == 0 || depIsLocalAt(deps_buf[..deps_len], i)
+        if !skip && filter_len > 0 {
+            if !std.mem.eql(name_buf[..nlen], filter_buf[..filter_len]) {
+                skip = true
+            }
+        }
+        if !skip {
+            let name: Span<u8> = name_buf[..nlen]
+            var cur_buf: [32]u8 = [0_u8; 32]
+            let cur_len: usize = depVersionAt(deps_buf[..deps_len], i, cur_buf)
+
+            var body_buf: [4096]u8 = [0_u8; 4096]
+            let blen: usize = fetchPackageBody(registry_url, name, body_buf)
+            if blen > 0 {
+                var latest_buf: [32]u8 = [0_u8; 32]
+                let llen: usize = jsonStrField(body_buf[..blen], "latest", latest_buf)
+                if llen > 0 && cur_len > 0 && semverValid(cur_buf[..cur_len]) && semverValid(latest_buf[..llen]) {
+                    if semverCompare(latest_buf[..llen], cur_buf[..cur_len]) > 0 {
+                        var new_deps: [2048]u8 = [0_u8; 2048]
+                        let ndlen: usize = buildDepsWithAdded(deps_buf[..deps_len], name, latest_buf[..llen], new_deps)
+                        if ndlen > 0 {
+                            deps_len = std.mem.copy(deps_buf, new_deps[..ndlen])
+                            updated = updated + 1
+
+                            var msg_buf: [96]u8 = [0_u8; 96]
+                            var mc: usize = 0
+                            let a1: Maybe<usize> = std.io.writeSpan(msg_buf, mc, "updating ")
+                            if a1.has { mc = a1.value }
+                            let a2: Maybe<usize> = std.io.writeSpan(msg_buf, mc, name)
+                            if a2.has { mc = a2.value }
+                            let a3: Maybe<usize> = std.io.writeSpan(msg_buf, mc, " to ")
+                            if a3.has { mc = a3.value }
+                            let a4: Maybe<usize> = std.io.writeSpan(msg_buf, mc, latest_buf[..llen])
+                            if a4.has { mc = a4.value }
+                            cursor = outLine(out, cursor, std.io.written(msg_buf, mc))
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    if updated == 0 {
+        return outLine(out, cursor, "all packages are up to date")
+    }
+
+    var pkg_name_buf: [64]u8 = [0_u8; 64]
+    let pnlen: usize = manifestPkgName(manifest_bytes, pkg_name_buf)
+    var pkg_ver_buf: [32]u8 = [0_u8; 32]
+    let pvlen: usize = manifestPkgVersion(manifest_bytes, pkg_ver_buf)
+    var targets_buf: [512]u8 = [0_u8; 512]
+    let tlen: usize = manifestTargetsRaw(manifest_bytes, targets_buf)
+
+    if !writeManifestZeroJson(pkg_name_buf[..pnlen], pkg_ver_buf[..pvlen], targets_buf[..tlen], deps_buf[..deps_len]) {
+        return outError(out, cursor, "failed to write zero.json")
+    }
+
+    // Re-resolve and install
+    var status: [1]u8 = [0_u8; 1]
+    cursor = installAllDeps(out, cursor, status)
+    if status[0] != 0_u8 {
+        return cursor
+    }
+
+    return outLine(out, cursor, "packages updated")
+}

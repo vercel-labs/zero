@@ -1,0 +1,33 @@
+// resolver.0 — pin a dependency constraint to an exact registry version
+
+use std.mem
+
+use jsonwalk
+use semver
+use registry
+
+// Resolve `constraint` for `name` to an exact version written into `out`.
+// Exact constraints pass through; range constraints ("", "^x.y.z", ">=x.y.z")
+// resolve against the registry's latest version. Returns length or 0.
+pub fn resolveVersionFor(registry_url: Span<u8>, name: Span<u8>, constraint: Span<u8>, out: MutSpan<u8>) -> usize {
+    let clen: usize = std.mem.len(constraint)
+    if clen > 0 && constraint[0] != 94_u8 && constraint[0] != 62_u8 {
+        // exact pin — use as-is
+        return std.mem.copy(out, constraint)
+    }
+
+    var body_buf: [4096]u8 = [0_u8; 4096]
+    let blen: usize = fetchPackageBody(registry_url, name, body_buf)
+    if blen == 0 {
+        return 0
+    }
+    var latest_buf: [32]u8 = [0_u8; 32]
+    let llen: usize = jsonStrField(body_buf[..blen], "latest", latest_buf)
+    if llen == 0 {
+        return 0
+    }
+    if !semverSatisfies(latest_buf[..llen], constraint) {
+        return 0
+    }
+    return std.mem.copy(out, latest_buf[..llen])
+}

@@ -1,0 +1,65 @@
+// output.0 — buffered console output helpers
+// The direct backend does not lower World-typed parameters, so commands append
+// their output into a caller-owned buffer that main() writes once.
+
+use std.mem
+use std.io
+
+// Append `text` + newline. Returns the new cursor (unchanged on overflow).
+pub fn outLine(buf: MutSpan<u8>, cursor_in: usize, text: Span<u8>) -> usize {
+    var cursor: usize = cursor_in
+    let c1: Maybe<usize> = std.io.writeSpan(buf, cursor, text)
+    if !c1.has { return cursor_in }
+    cursor = c1.value
+    let c2: Maybe<usize> = std.io.writeSpan(buf, cursor, "\n")
+    if !c2.has { return cursor_in }
+    return c2.value
+}
+
+// Append "error: " + `text` + newline.
+pub fn outError(buf: MutSpan<u8>, cursor_in: usize, text: Span<u8>) -> usize {
+    var cursor: usize = cursor_in
+    let c1: Maybe<usize> = std.io.writeSpan(buf, cursor, "error: ")
+    if !c1.has { return cursor_in }
+    cursor = c1.value
+    let c2: Maybe<usize> = std.io.writeSpan(buf, cursor, text)
+    if !c2.has { return cursor_in }
+    cursor = c2.value
+    let c3: Maybe<usize> = std.io.writeSpan(buf, cursor, "\n")
+    if !c3.has { return cursor_in }
+    return c3.value
+}
+
+// Append "<name>@<version>" + newline.
+pub fn outPackage(buf: MutSpan<u8>, cursor_in: usize, name: Span<u8>, version: Span<u8>) -> usize {
+    var cursor: usize = cursor_in
+    let c1: Maybe<usize> = std.io.writeSpan(buf, cursor, name)
+    if !c1.has { return cursor_in }
+    cursor = c1.value
+    let c2: Maybe<usize> = std.io.writeSpan(buf, cursor, "@")
+    if !c2.has { return cursor_in }
+    cursor = c2.value
+    let c3: Maybe<usize> = std.io.writeSpan(buf, cursor, version)
+    if !c3.has { return cursor_in }
+    cursor = c3.value
+    let c4: Maybe<usize> = std.io.writeSpan(buf, cursor, "\n")
+    if !c4.has { return cursor_in }
+    return c4.value
+}
+
+// Append "<key>: <value>" + newline.
+pub fn outKeyValue(buf: MutSpan<u8>, cursor_in: usize, key: Span<u8>, value: Span<u8>) -> usize {
+    var cursor: usize = cursor_in
+    let c1: Maybe<usize> = std.io.writeSpan(buf, cursor, key)
+    if !c1.has { return cursor_in }
+    cursor = c1.value
+    let c2: Maybe<usize> = std.io.writeSpan(buf, cursor, ": ")
+    if !c2.has { return cursor_in }
+    cursor = c2.value
+    let c3: Maybe<usize> = std.io.writeSpan(buf, cursor, value)
+    if !c3.has { return cursor_in }
+    cursor = c3.value
+    let c4: Maybe<usize> = std.io.writeSpan(buf, cursor, "\n")
+    if !c4.has { return cursor_in }
+    return c4.value
+}

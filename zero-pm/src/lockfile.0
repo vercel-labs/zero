@@ -1,0 +1,246 @@
+// lockfile.0 — read and write .zero/zero.lock.json (buffer style)
+// Lock data is carried as the raw "packages" JSON object:
+//   {"<name>": {"version": "..", "url": "..", "checksum": ".."}, ...}
+
+use std.mem
+use std.fs
+use std.io
+use std.json
+
+use jsonwalk
+
+// Read the lock file and copy its "packages" object into `out`.
+// Returns the object length, or 0 when the file is missing/invalid.
+pub fn readLockPackages(fs: Fs, path: String, out: MutSpan<u8>) -> usize {
+    var file_buf: [6144]u8 = [0_u8; 6144]
+    let n_m: Maybe<usize> = std.fs.readFile(fs, path, file_buf)
+    if !n_m.has {
+        return 0
+    }
+    let bytes: Span<u8> = file_buf[..n_m.value]
+    let pkgs_m: Maybe<Span<u8>> = std.json.field(bytes, "packages")
+    if !pkgs_m.has {
+        return 0
+    }
+    return std.mem.copy(out, pkgs_m.value)
+}
+
+// Number of locked packages.
+pub fn lockCount(pkgs: Span<u8>) -> usize {
+    return countObjEntries(pkgs)
+}
+
+// Decode the package name at `index` into `out`. Returns length or 0.
+pub fn lockNameAt(pkgs: Span<u8>, index: usize, out: MutSpan<u8>) -> usize {
+    return objKeyAt(pkgs, index, out)
+}
+
+// Decode the string field `key` of the entry at `index`. Returns length or 0.
+pub fn lockFieldAt(pkgs: Span<u8>, index: usize, key: String, out: MutSpan<u8>) -> usize {
+    let vstart: usize = objValStartAt(pkgs, index)
+    if vstart == 0 {
+        return 0
+    }
+    let vend: usize = objValEndAt(pkgs, index)
+    if vend == 0 {
+        return 0
+    }
+    return jsonStrField(pkgs[vstart..vend], key, out)
+}
+
+// Find a locked package by name. Returns its index, or the count if absent.
+pub fn lockFindIndex(pkgs: Span<u8>, name: Span<u8>) -> usize {
+    let count: usize = lockCount(pkgs)
+    var i: usize = 0
+    while i < count {
+        var key_buf: [64]u8 = [0_u8; 64]
+        let klen: usize = lockNameAt(pkgs, i, key_buf)
+        if klen > 0 && std.mem.eql(key_buf[..klen], name) {
+            return i
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Build the {"version","url","checksum"} entry value JSON into `out`.
+// Returns its length, or 0 on overflow.
+pub fn buildLockEntryJson(version: Span<u8>, url: Span<u8>, checksum: Span<u8>, out: MutSpan<u8>) -> usize {
+    var cursor: usize = 0
+    let k1: Maybe<usize> = std.io.writeSpan(out, cursor, "{\"version\": \"")
+    if !k1.has { return 0 }
+    cursor = k1.value
+    let k2: Maybe<usize> = std.io.writeSpan(out, cursor, version)
+    if !k2.has { return 0 }
+    cursor = k2.value
+    let k3: Maybe<usize> = std.io.writeSpan(out, cursor, "\", \"url\": \"")
+    if !k3.has { return 0 }
+    cursor = k3.value
+    let k4: Maybe<usize> = std.io.writeSpan(out, cursor, url)
+    if !k4.has { return 0 }
+    cursor = k4.value
+    let k5: Maybe<usize> = std.io.writeSpan(out, cursor, "\", \"checksum\": \"")
+    if !k5.has { return 0 }
+    cursor = k5.value
+    let k6: Maybe<usize> = std.io.writeSpan(out, cursor, checksum)
+    if !k6.has { return 0 }
+    cursor = k6.value
+    let k7: Maybe<usize> = std.io.writeSpan(out, cursor, "\"}")
+    if !k7.has { return 0 }
+    return k7.value
+}
+
+// Upsert an entry (prebuilt via buildLockEntryJson) into the packages object.
+// Writes the new object into `out` and returns its length, or 0 on overflow.
+pub fn lockUpsert(pkgs: Span<u8>, name: Span<u8>, entry_json: Span<u8>, out: MutSpan<u8>) -> usize {
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(out, cursor, "{")
+    if !c1.has { return 0 }
+    cursor = c1.value
+
+    var first: Bool = true
+    var replaced: Bool = false
+    let count: usize = lockCount(pkgs)
+    var i: usize = 0
+    while i < count {
+        var key_buf: [64]u8 = [0_u8; 64]
+        let klen: usize = lockNameAt(pkgs, i, key_buf)
+        let vstart: usize = objValStartAt(pkgs, i)
+        let vend: usize = objValEndAt(pkgs, i)
+        if klen > 0 && vstart > 0 && vend > vstart {
+            if !first {
+                let cs: Maybe<usize> = std.io.writeSpan(out, cursor, ", ")
+                if !cs.has { return 0 }
+                cursor = cs.value
+            }
+            first = false
+            if std.mem.eql(key_buf[..klen], name) {
+                let r1: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+                if !r1.has { return 0 }
+                cursor = r1.value
+                let r2: Maybe<usize> = std.io.writeSpan(out, cursor, name)
+                if !r2.has { return 0 }
+                cursor = r2.value
+                let r3: Maybe<usize> = std.io.writeSpan(out, cursor, "\": ")
+                if !r3.has { return 0 }
+                cursor = r3.value
+                let r4: Maybe<usize> = std.io.writeSpan(out, cursor, entry_json)
+                if !r4.has { return 0 }
+                cursor = r4.value
+                replaced = true
+            } else {
+                let k1: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+                if !k1.has { return 0 }
+                cursor = k1.value
+                let k2: Maybe<usize> = std.io.writeSpan(out, cursor, key_buf[..klen])
+                if !k2.has { return 0 }
+                cursor = k2.value
+                let k3: Maybe<usize> = std.io.writeSpan(out, cursor, "\": ")
+                if !k3.has { return 0 }
+                cursor = k3.value
+                let v1: Maybe<usize> = std.io.writeSpan(out, cursor, pkgs[vstart..vend])
+                if !v1.has { return 0 }
+                cursor = v1.value
+            }
+        }
+        i = i + 1
+    }
+
+    if !replaced {
+        if !first {
+            let cs: Maybe<usize> = std.io.writeSpan(out, cursor, ", ")
+            if !cs.has { return 0 }
+            cursor = cs.value
+        }
+        let a1: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+        if !a1.has { return 0 }
+        cursor = a1.value
+        let a2: Maybe<usize> = std.io.writeSpan(out, cursor, name)
+        if !a2.has { return 0 }
+        cursor = a2.value
+        let a3: Maybe<usize> = std.io.writeSpan(out, cursor, "\": ")
+        if !a3.has { return 0 }
+        cursor = a3.value
+        let a4: Maybe<usize> = std.io.writeSpan(out, cursor, entry_json)
+        if !a4.has { return 0 }
+        cursor = a4.value
+    }
+
+    let close: Maybe<usize> = std.io.writeSpan(out, cursor, "}")
+    if !close.has { return 0 }
+    return close.value
+}
+
+// Rebuild the packages object without `name`. Returns the new length, or 0
+// when `name` was not present (or on overflow).
+pub fn lockRemove(pkgs: Span<u8>, name: Span<u8>, out: MutSpan<u8>) -> usize {
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(out, cursor, "{")
+    if !c1.has { return 0 }
+    cursor = c1.value
+
+    var first: Bool = true
+    var removed: Bool = false
+    let count: usize = lockCount(pkgs)
+    var i: usize = 0
+    while i < count {
+        var key_buf: [64]u8 = [0_u8; 64]
+        let klen: usize = lockNameAt(pkgs, i, key_buf)
+        let vstart: usize = objValStartAt(pkgs, i)
+        let vend: usize = objValEndAt(pkgs, i)
+        if klen > 0 && vstart > 0 && vend > vstart {
+            if std.mem.eql(key_buf[..klen], name) {
+                removed = true
+            } else {
+                if !first {
+                    let cs: Maybe<usize> = std.io.writeSpan(out, cursor, ", ")
+                    if !cs.has { return 0 }
+                    cursor = cs.value
+                }
+                first = false
+                let k1: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+                if !k1.has { return 0 }
+                cursor = k1.value
+                let k2: Maybe<usize> = std.io.writeSpan(out, cursor, key_buf[..klen])
+                if !k2.has { return 0 }
+                cursor = k2.value
+                let k3: Maybe<usize> = std.io.writeSpan(out, cursor, "\": ")
+                if !k3.has { return 0 }
+                cursor = k3.value
+                let v1: Maybe<usize> = std.io.writeSpan(out, cursor, pkgs[vstart..vend])
+                if !v1.has { return 0 }
+                cursor = v1.value
+            }
+        }
+        i = i + 1
+    }
+
+    if !removed {
+        return 0
+    }
+    let close: Maybe<usize> = std.io.writeSpan(out, cursor, "}")
+    if !close.has { return 0 }
+    return close.value
+}
+
+// Write the lock file wrapping `pkgs` in the schema envelope.
+pub fn writeLockFile(fs: Fs, path: String, pkgs: Span<u8>) -> Bool {
+    var out_buf: [6144]u8 = [0_u8; 6144]
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(out_buf, cursor, "{\"version\": 1, \"packages\": ")
+    if !c1.has { return false }
+    cursor = c1.value
+    if std.mem.len(pkgs) > 0 {
+        let c2: Maybe<usize> = std.io.writeSpan(out_buf, cursor, pkgs)
+        if !c2.has { return false }
+        cursor = c2.value
+    } else {
+        let c2: Maybe<usize> = std.io.writeSpan(out_buf, cursor, "{}")
+        if !c2.has { return false }
+        cursor = c2.value
+    }
+    let c3: Maybe<usize> = std.io.writeSpan(out_buf, cursor, "}\n")
+    if !c3.has { return false }
+    cursor = c3.value
+    return std.fs.writeFile(fs, path, std.io.written(out_buf, cursor))
+}

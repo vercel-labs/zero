@@ -1,0 +1,86 @@
+// registry.0 — HTTP registry client (buffer style)
+// Registry API:
+//   GET /v1/packages/<name>         → {"name", "description", "latest"}
+//   GET /v1/packages/<name>/<ver>   → {"name", "version", "download_url", "checksum", ...}
+//
+// The direct backend allows at most eight ABI argument slots per call (a span
+// costs two), so each fetch helper owns its HTTP client and scratch buffers.
+
+use std.mem
+use std.env
+use std.http
+use std.net
+use std.time
+use std.io
+
+// Resolve the registry base URL (ZERO_REGISTRY env override) into `buf`.
+pub fn registryUrlInto(buf: MutSpan<u8>) -> usize {
+    let reg_env: Maybe<String> = std.env.get("ZERO_REGISTRY")
+    if reg_env.has {
+        return std.mem.copy(buf, std.mem.span(reg_env.value))
+    }
+    return std.mem.copy(buf, "https://registry.zerolang.ai")
+}
+
+// Send a GET request for `api_path` and copy the response body JSON into
+// `body_out`. Returns the body length, or 0 on failure.
+fn fetchBodyFor(registry_url: Span<u8>, api_path: Span<u8>, body_out: MutSpan<u8>) -> usize {
+    var line_buf: [384]u8 = [0_u8; 384]
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(line_buf, cursor, "GET ")
+    if !c1.has { return 0 }
+    cursor = c1.value
+    let c2: Maybe<usize> = std.io.writeSpan(line_buf, cursor, registry_url)
+    if !c2.has { return 0 }
+    cursor = c2.value
+    let c3: Maybe<usize> = std.io.writeSpan(line_buf, cursor, api_path)
+    if !c3.has { return 0 }
+    cursor = c3.value
+    let start_line: Span<u8> = std.io.written(line_buf, cursor)
+
+    var req_buf: [512]u8 = [0_u8; 512]
+    let req: Maybe<Span<u8>> = std.http.writeRequest(req_buf, start_line, "")
+    if !req.has { return 0 }
+
+    let client: HttpClient = std.http.client(std.net.host())
+    var resp_buf: [8192]u8 = [0_u8; 8192]
+    let result: HttpResult = std.http.fetch(client, req.value, resp_buf, std.time.ms(10000))
+    if !std.http.resultOk(result) { return 0 }
+    if std.http.resultStatus(result) != 200_u16 { return 0 }
+
+    let body: Maybe<Span<u8>> = std.http.responseBody(resp_buf, result)
+    if !body.has { return 0 }
+    return std.mem.copy(body_out, body.value)
+}
+
+// GET /v1/packages/<name>. Returns the body length in `body_out`, or 0.
+pub fn fetchPackageBody(registry_url: Span<u8>, name: Span<u8>, body_out: MutSpan<u8>) -> usize {
+    var path_buf: [128]u8 = [0_u8; 128]
+    var cursor: usize = 0
+    let p1: Maybe<usize> = std.io.writeSpan(path_buf, cursor, "/v1/packages/")
+    if !p1.has { return 0 }
+    cursor = p1.value
+    let p2: Maybe<usize> = std.io.writeSpan(path_buf, cursor, name)
+    if !p2.has { return 0 }
+    cursor = p2.value
+    return fetchBodyFor(registry_url, std.io.written(path_buf, cursor), body_out)
+}
+
+// GET /v1/packages/<name>/<version>. Returns the body length in `body_out`, or 0.
+pub fn fetchVersionBody(registry_url: Span<u8>, name: Span<u8>, version: Span<u8>, body_out: MutSpan<u8>) -> usize {
+    var path_buf: [160]u8 = [0_u8; 160]
+    var cursor: usize = 0
+    let p1: Maybe<usize> = std.io.writeSpan(path_buf, cursor, "/v1/packages/")
+    if !p1.has { return 0 }
+    cursor = p1.value
+    let p2: Maybe<usize> = std.io.writeSpan(path_buf, cursor, name)
+    if !p2.has { return 0 }
+    cursor = p2.value
+    let p3: Maybe<usize> = std.io.writeSpan(path_buf, cursor, "/")
+    if !p3.has { return 0 }
+    cursor = p3.value
+    let p4: Maybe<usize> = std.io.writeSpan(path_buf, cursor, version)
+    if !p4.has { return 0 }
+    cursor = p4.value
+    return fetchBodyFor(registry_url, std.io.written(path_buf, cursor), body_out)
+}

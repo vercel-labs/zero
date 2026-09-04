@@ -1,0 +1,98 @@
+// auth.0 — password hashing and session token management
+
+use std.mem
+
+extern c "c/argon2_wrap.h" as argon2
+
+pub type TokenClaims {
+    user_id:  u64,
+    is_admin: i32,
+    valid:    i32,
+}
+
+// ─── Buffer string helpers ──────────────────────────────────────────────────
+
+fn write_ar_string(offset: i32, s: String) -> i32 {
+    let bytes: Span<u8> = std.mem.span(s)
+    let len: usize = std.mem.len(bytes)
+    var i: usize = 0
+    while i < len {
+        argon2.ar_write_buffer(offset + (i as i32), bytes[i])
+        i = i + 1
+    }
+    argon2.ar_write_buffer(offset + (len as i32), 0_u8)
+    return len as i32
+}
+
+// ─── Password hashing ─────────────────────────────────────────────────────
+
+// Hash password with Argon2id. Returns "" on error or if password < 8 chars.
+pub fn hash_password(password: String, dest_buf: MutSpan<u8>) -> String {
+    let pbytes: Span<u8> = std.mem.span(password)
+    if std.mem.len(pbytes) < 8 {
+        return ""
+    }
+    let _p: i32 = write_ar_string(0, password)
+    let hash_len: i32 = argon2.ar_hash_str(0, 256)
+    if hash_len == 0 {
+        return ""
+    }
+    var i: i32 = 0
+    while i < hash_len {
+        dest_buf[i as usize] = argon2.ar_read_buffer(256 + i)
+        i = i + 1
+    }
+    let span: Span<u8> = std.mem.prefix(dest_buf, hash_len as usize)
+    return span
+}
+
+// Verify password against a stored Argon2id hash. Returns false on any mismatch.
+pub fn verify_password(stored_hash: String, password: String) -> Bool {
+    let _s: i32 = write_ar_string(0, stored_hash)
+    let _p: i32 = write_ar_string(256, password)
+    return argon2.ar_verify(0, 256) == 1
+}
+
+// ─── Session tokens ───────────────────────────────────────────────────────
+
+// Create a signed session token. Returns "" on error.
+pub fn create_token(user_id: u64, is_admin: Bool, dest_buf: MutSpan<u8>) -> String {
+    var flag: i32 = 0
+    if is_admin {
+        flag = 1
+    }
+    let token_len: i32 = argon2.ar_token_create(user_id, flag, 0)
+    if token_len == 0 {
+        return ""
+    }
+    var i: i32 = 0
+    while i < token_len {
+        dest_buf[i as usize] = argon2.ar_read_buffer(i)
+        i = i + 1
+    }
+    let span: Span<u8> = std.mem.prefix(dest_buf, token_len as usize)
+    return span
+}
+
+pub fn verify_token(token: String, out_user_id: MutSpan<u64>, out_is_admin: MutSpan<i32>, out_valid: MutSpan<i32>) -> Void {
+    out_user_id[0] = 0_u64
+    out_is_admin[0] = 0
+    out_valid[0] = 0
+
+    let tbytes: Span<u8> = std.mem.span(token)
+    if std.mem.len(tbytes) < 10 {
+        return
+    }
+    let _t: i32 = write_ar_string(0, token)
+    let ok: i32 = argon2.ar_token_verify(0)
+    if ok == 0 {
+        return
+    }
+    out_user_id[0] = argon2.ar_token_user_id()
+    out_is_admin[0] = argon2.ar_token_is_admin()
+    out_valid[0] = 1
+}
+
+test "auth sentinels" {
+    expect true
+}

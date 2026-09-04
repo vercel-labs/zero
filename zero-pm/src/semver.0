@@ -1,0 +1,99 @@
+// semver.0 — SemVer comparison and constraint matching over byte spans
+
+use std.mem
+use std.str
+use std.parse
+
+// Parse the dot-separated component at `idx` (0=major, 1=minor, 2=patch).
+pub fn semverPartAt(text: Span<u8>, idx: usize) -> Maybe<u32> {
+    let len: usize = std.mem.len(text)
+    if len == 0 {
+        return null
+    }
+    var part: usize = 0
+    var start: usize = 0
+    var i: usize = 0
+    while i <= len {
+        if i == len || text[i] == 46_u8 {
+            if part == idx {
+                if i <= start {
+                    return null
+                }
+                return std.parse.parseU32(text[start..i])
+            }
+            part = part + 1
+            start = i + 1
+        }
+        i = i + 1
+    }
+    return null
+}
+
+// True when `text` is a well-formed "major.minor.patch" version.
+pub fn semverValid(text: Span<u8>) -> Bool {
+    let a: Maybe<u32> = semverPartAt(text, 0)
+    let b: Maybe<u32> = semverPartAt(text, 1)
+    let c: Maybe<u32> = semverPartAt(text, 2)
+    return a.has && b.has && c.has
+}
+
+// Numeric value of component `idx`, treating absent parts as 0.
+fn partOrZero(text: Span<u8>, idx: usize) -> u32 {
+    let p: Maybe<u32> = semverPartAt(text, idx)
+    if p.has {
+        return p.value
+    }
+    return 0_u32
+}
+
+// Compare two versions. Returns -1, 0, or 1.
+pub fn semverCompare(a: Span<u8>, b: Span<u8>) -> i32 {
+    var idx: usize = 0
+    while idx < 3 {
+        let av: u32 = partOrZero(a, idx)
+        let bv: u32 = partOrZero(b, idx)
+        if av < bv { return -1 }
+        if av > bv { return 1 }
+        idx = idx + 1
+    }
+    return 0
+}
+
+// Check if `version` satisfies `constraint`.
+// Supports:
+//   ""        — any version
+//   "1.2.3"   — exact match
+//   "^1.2.3"  — same major, >= minor.patch
+//   ">=1.2.3" — greater or equal
+pub fn semverSatisfies(version: Span<u8>, constraint: Span<u8>) -> Bool {
+    let clen: usize = std.mem.len(constraint)
+    if clen == 0 {
+        return true
+    }
+    if constraint[0] == 94_u8 {
+        let req: Span<u8> = constraint[1..]
+        if !semverValid(req) {
+            return false
+        }
+        if partOrZero(version, 0) != partOrZero(req, 0) {
+            return false
+        }
+        return semverCompare(version, req) >= 0
+    }
+    if std.str.startsWith(constraint, ">=") {
+        let req: Span<u8> = constraint[2..]
+        if !semverValid(req) {
+            return false
+        }
+        return semverCompare(version, req) >= 0
+    }
+    if !semverValid(constraint) {
+        return false
+    }
+    return semverCompare(version, constraint) == 0
+}
+
+// NOTE: `zero test` direct-runner currently only lowers scalar test bodies
+// (no span parameters or Maybe locals), so semver behavior is covered by the
+// end-to-end flow in registry/test_integration.py and the 0pm CLI instead of
+// in-file test blocks.

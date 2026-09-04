@@ -1,0 +1,289 @@
+// manifest.0 — read and write zero.json package manifests (buffer style)
+// A manifest is carried around as its raw JSON bytes; helpers extract or
+// rebuild pieces into caller-owned buffers.
+
+use std.mem
+use std.fs
+use std.io
+use std.json
+
+use jsonwalk
+
+// Read the manifest file into `buf`. Returns byte length or 0 on failure.
+pub fn readManifestRaw(fs: Fs, path: String, buf: MutSpan<u8>) -> usize {
+    let n_m: Maybe<usize> = std.fs.readFile(fs, path, buf)
+    if !n_m.has {
+        return 0
+    }
+    return n_m.value
+}
+
+// Decode package.name into `out`. Returns length or 0.
+pub fn manifestPkgName(manifest: Span<u8>, out: MutSpan<u8>) -> usize {
+    let pkg_m: Maybe<Span<u8>> = std.json.field(manifest, "package")
+    if !pkg_m.has {
+        return 0
+    }
+    return jsonStrField(pkg_m.value, "name", out)
+}
+
+// Decode package.version into `out`. Returns length or 0.
+pub fn manifestPkgVersion(manifest: Span<u8>, out: MutSpan<u8>) -> usize {
+    let pkg_m: Maybe<Span<u8>> = std.json.field(manifest, "package")
+    if !pkg_m.has {
+        return 0
+    }
+    return jsonStrField(pkg_m.value, "version", out)
+}
+
+// Copy the raw "targets" JSON object into `out`. Returns length or 0.
+pub fn manifestTargetsRaw(manifest: Span<u8>, out: MutSpan<u8>) -> usize {
+    let tgt_m: Maybe<Span<u8>> = std.json.field(manifest, "targets")
+    if !tgt_m.has {
+        return 0
+    }
+    return std.mem.copy(out, tgt_m.value)
+}
+
+// Copy the raw "dependencies" JSON object into `out`. Returns length or 0.
+pub fn manifestDepsRaw(manifest: Span<u8>, out: MutSpan<u8>) -> usize {
+    let deps_m: Maybe<Span<u8>> = std.json.field(manifest, "dependencies")
+    if !deps_m.has {
+        return 0
+    }
+    return std.mem.copy(out, deps_m.value)
+}
+
+// Decode the name of the dependency at `index` into `out`. Returns length or 0.
+pub fn depNameAt(deps: Span<u8>, index: usize, out: MutSpan<u8>) -> usize {
+    return objKeyAt(deps, index, out)
+}
+
+// True when the dependency at `index` is a local path dependency (object value).
+pub fn depIsLocalAt(deps: Span<u8>, index: usize) -> Bool {
+    let vstart: usize = objValStartAt(deps, index)
+    if vstart == 0 {
+        return false
+    }
+    return deps[vstart] == 123_u8
+}
+
+// Decode the version (or constraint) of the dependency at `index` into `out`.
+// For local deps this reads the object's "version" field. Returns length or 0.
+pub fn depVersionAt(deps: Span<u8>, index: usize, out: MutSpan<u8>) -> usize {
+    let vstart: usize = objValStartAt(deps, index)
+    if vstart == 0 {
+        return 0
+    }
+    let vend: usize = objValEndAt(deps, index)
+    if vend == 0 {
+        return 0
+    }
+    let val: Span<u8> = deps[vstart..vend]
+    if std.mem.len(val) > 0 && val[0] == 123_u8 {
+        return jsonStrField(val, "version", out)
+    }
+    let d: Maybe<Span<u8>> = decodeStr(out, val)
+    if !d.has {
+        return 0
+    }
+    return std.mem.len(d.value)
+}
+
+// Find a dependency by name. Returns its index, or the entry count if absent.
+pub fn findDepIndex(deps: Span<u8>, name: Span<u8>) -> usize {
+    let count: usize = countObjEntries(deps)
+    var i: usize = 0
+    while i < count {
+        var key_buf: [64]u8 = [0_u8; 64]
+        let klen: usize = depNameAt(deps, i, key_buf)
+        if klen > 0 && std.mem.eql(key_buf[..klen], name) {
+            return i
+        }
+        i = i + 1
+    }
+    return count
+}
+
+// Rebuild the deps JSON with `name` pinned to `version` (replace or append).
+// Writes the new object into `out` and returns its length, or 0 on overflow.
+pub fn buildDepsWithAdded(deps: Span<u8>, name: Span<u8>, version: Span<u8>, out: MutSpan<u8>) -> usize {
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(out, cursor, "{")
+    if !c1.has { return 0 }
+    cursor = c1.value
+
+    var first: Bool = true
+    var replaced: Bool = false
+    let count: usize = countObjEntries(deps)
+    var i: usize = 0
+    while i < count {
+        var key_buf: [64]u8 = [0_u8; 64]
+        let klen: usize = objKeyAt(deps, i, key_buf)
+        let vstart: usize = objValStartAt(deps, i)
+        let vend: usize = objValEndAt(deps, i)
+        if klen > 0 && vstart > 0 && vend > vstart {
+            if !first {
+                let cs: Maybe<usize> = std.io.writeSpan(out, cursor, ", ")
+                if !cs.has { return 0 }
+                cursor = cs.value
+            }
+            first = false
+            let k1: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+            if !k1.has { return 0 }
+            cursor = k1.value
+            let k2: Maybe<usize> = std.io.writeSpan(out, cursor, key_buf[..klen])
+            if !k2.has { return 0 }
+            cursor = k2.value
+            let k3: Maybe<usize> = std.io.writeSpan(out, cursor, "\": ")
+            if !k3.has { return 0 }
+            cursor = k3.value
+            if std.mem.eql(key_buf[..klen], name) {
+                let v1: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+                if !v1.has { return 0 }
+                cursor = v1.value
+                let v2: Maybe<usize> = std.io.writeSpan(out, cursor, version)
+                if !v2.has { return 0 }
+                cursor = v2.value
+                let v3: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+                if !v3.has { return 0 }
+                cursor = v3.value
+                replaced = true
+            } else {
+                let v1: Maybe<usize> = std.io.writeSpan(out, cursor, deps[vstart..vend])
+                if !v1.has { return 0 }
+                cursor = v1.value
+            }
+        }
+        i = i + 1
+    }
+
+    if !replaced {
+        if !first {
+            let cs: Maybe<usize> = std.io.writeSpan(out, cursor, ", ")
+            if !cs.has { return 0 }
+            cursor = cs.value
+        }
+        let a1: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+        if !a1.has { return 0 }
+        cursor = a1.value
+        let a2: Maybe<usize> = std.io.writeSpan(out, cursor, name)
+        if !a2.has { return 0 }
+        cursor = a2.value
+        let a3: Maybe<usize> = std.io.writeSpan(out, cursor, "\": \"")
+        if !a3.has { return 0 }
+        cursor = a3.value
+        let a4: Maybe<usize> = std.io.writeSpan(out, cursor, version)
+        if !a4.has { return 0 }
+        cursor = a4.value
+        let a5: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+        if !a5.has { return 0 }
+        cursor = a5.value
+    }
+
+    let close: Maybe<usize> = std.io.writeSpan(out, cursor, "}")
+    if !close.has { return 0 }
+    return close.value
+}
+
+// Rebuild the deps JSON without `name`. Writes into `out` and returns the new
+// length, or 0 when `name` was not present (or on overflow).
+pub fn buildDepsWithRemoved(deps: Span<u8>, name: Span<u8>, out: MutSpan<u8>) -> usize {
+    var cursor: usize = 0
+    let c1: Maybe<usize> = std.io.writeSpan(out, cursor, "{")
+    if !c1.has { return 0 }
+    cursor = c1.value
+
+    var first: Bool = true
+    var removed: Bool = false
+    let count: usize = countObjEntries(deps)
+    var i: usize = 0
+    while i < count {
+        var key_buf: [64]u8 = [0_u8; 64]
+        let klen: usize = objKeyAt(deps, i, key_buf)
+        let vstart: usize = objValStartAt(deps, i)
+        let vend: usize = objValEndAt(deps, i)
+        if klen > 0 && vstart > 0 && vend > vstart {
+            if std.mem.eql(key_buf[..klen], name) {
+                removed = true
+            } else {
+                if !first {
+                    let cs: Maybe<usize> = std.io.writeSpan(out, cursor, ", ")
+                    if !cs.has { return 0 }
+                    cursor = cs.value
+                }
+                first = false
+                let k1: Maybe<usize> = std.io.writeSpan(out, cursor, "\"")
+                if !k1.has { return 0 }
+                cursor = k1.value
+                let k2: Maybe<usize> = std.io.writeSpan(out, cursor, key_buf[..klen])
+                if !k2.has { return 0 }
+                cursor = k2.value
+                let k3: Maybe<usize> = std.io.writeSpan(out, cursor, "\": ")
+                if !k3.has { return 0 }
+                cursor = k3.value
+                let v1: Maybe<usize> = std.io.writeSpan(out, cursor, deps[vstart..vend])
+                if !v1.has { return 0 }
+                cursor = v1.value
+            }
+        }
+        i = i + 1
+    }
+
+    if !removed {
+        return 0
+    }
+    let close: Maybe<usize> = std.io.writeSpan(out, cursor, "}")
+    if !close.has { return 0 }
+    return close.value
+}
+
+// Serialize and write ./zero.json from its pieces. Empty `targets` selects the
+// default cli target; empty `deps` omits the dependencies section. The path is
+// fixed so the call stays within the direct backend's eight-ABI-slot limit.
+pub fn writeManifestZeroJson(name: Span<u8>, version: Span<u8>, targets: Span<u8>, deps: Span<u8>) -> Bool {
+    let fs: Fs = std.fs.host()
+    var out_buf: [4096]u8 = [0_u8; 4096]
+    var cursor: usize = 0
+
+    let c1: Maybe<usize> = std.io.writeSpan(out_buf, cursor, "{\n  \"package\": {\"name\": \"")
+    if !c1.has { return false }
+    cursor = c1.value
+    let c2: Maybe<usize> = std.io.writeSpan(out_buf, cursor, name)
+    if !c2.has { return false }
+    cursor = c2.value
+    let c3: Maybe<usize> = std.io.writeSpan(out_buf, cursor, "\", \"version\": \"")
+    if !c3.has { return false }
+    cursor = c3.value
+    let c4: Maybe<usize> = std.io.writeSpan(out_buf, cursor, version)
+    if !c4.has { return false }
+    cursor = c4.value
+    let c5: Maybe<usize> = std.io.writeSpan(out_buf, cursor, "\"},\n  \"targets\": ")
+    if !c5.has { return false }
+    cursor = c5.value
+
+    if std.mem.len(targets) > 0 {
+        let c6: Maybe<usize> = std.io.writeSpan(out_buf, cursor, targets)
+        if !c6.has { return false }
+        cursor = c6.value
+    } else {
+        let c6: Maybe<usize> = std.io.writeSpan(out_buf, cursor, "{\"cli\": {\"kind\": \"exe\", \"main\": \"src/main.0\"}}")
+        if !c6.has { return false }
+        cursor = c6.value
+    }
+
+    if std.mem.len(deps) > 0 {
+        let c7: Maybe<usize> = std.io.writeSpan(out_buf, cursor, ",\n  \"dependencies\": ")
+        if !c7.has { return false }
+        cursor = c7.value
+        let c8: Maybe<usize> = std.io.writeSpan(out_buf, cursor, deps)
+        if !c8.has { return false }
+        cursor = c8.value
+    }
+
+    let c9: Maybe<usize> = std.io.writeSpan(out_buf, cursor, "\n}\n")
+    if !c9.has { return false }
+    cursor = c9.value
+
+    return std.fs.writeFile(fs, "zero.json", std.io.written(out_buf, cursor))
+}

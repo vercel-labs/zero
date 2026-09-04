@@ -1,0 +1,191 @@
+// db.0 — MySQL connector (C interop via c/mysql_wrap.h)
+
+use std.mem
+
+extern c "c/mysql_wrap.h" as mysql_wrap
+
+extern type DbResultHandle {
+    handle:    i32,
+    row_count: i64,
+}
+
+extern type DbRowHandle {
+    conn_handle: i32,
+    row_index:   i32,
+}
+
+// ─── Buffer string helpers ──────────────────────────────────────────────────
+
+fn write_db_string(offset: i32, s: String) -> i32 {
+    let bytes: Span<u8> = std.mem.span(s)
+    let len: usize = std.mem.len(bytes)
+    var i: usize = 0
+    while i < len {
+        mysql_wrap.db_write_buffer(offset + (i as i32), bytes[i])
+        i = i + 1
+    }
+    mysql_wrap.db_write_buffer(offset + (len as i32), 0_u8)
+    return len as i32
+}
+
+// Connect to MySQL. Returns true on success, false on failure.
+pub fn db_connect(host: String, port: u16, user: String, password: String, database: String, out_conn: MutSpan<i32>) -> Bool {
+    let _h: i32 = write_db_string(0, host)
+    let _u: i32 = write_db_string(256, user)
+    let _p: i32 = write_db_string(1024, password)
+    let _d: i32 = write_db_string(2048, database)
+
+    let handle: i32 = mysql_wrap.db_connect(0, port, 256, 1024, 2048)
+    if handle < 0 {
+        return false
+    }
+    out_conn[0] = handle
+    return true
+}
+
+// Close connection — intended for use with `defer`.
+pub fn db_close(conn: i32) -> Void {
+    mysql_wrap.db_close(conn)
+}
+
+// Find a user by username. Returns true on success, false on failure (NotFound or DbError).
+pub fn db_find_user_by_username(conn: i32, username: String, uname_buf: MutSpan<u8>, email_buf: MutSpan<u8>, hash_buf: MutSpan<u8>, out_is_admin: MutSpan<i32>, out_lengths: MutSpan<i32>, out_uid: MutSpan<u64>) -> Bool {
+    let _u: i32 = write_db_string(0, username)
+    let res_handle: i32 = mysql_wrap.db_query_user_by_username(conn, 0)
+    if res_handle < 0 {
+        return false
+    }
+    let row_count: i64 = mysql_wrap.db_result_row_count(res_handle)
+    if row_count == 0 {
+        mysql_wrap.db_free_result(res_handle)
+        return false
+    }
+    let uid: u64 = mysql_wrap.db_row_u64(res_handle, 0, 0)
+
+    let uname_bytes: i32 = mysql_wrap.db_row_string(res_handle, 0, 1, 0)
+    var i1: i32 = 0
+    while i1 < uname_bytes {
+        uname_buf[i1 as usize] = mysql_wrap.db_read_buffer(i1)
+        i1 = i1 + 1
+    }
+    out_lengths[0] = uname_bytes
+
+    let email_bytes: i32 = mysql_wrap.db_row_string(res_handle, 0, 2, 0)
+    var i2: i32 = 0
+    while i2 < email_bytes {
+        email_buf[i2 as usize] = mysql_wrap.db_read_buffer(i2)
+        i2 = i2 + 1
+    }
+    out_lengths[1] = email_bytes
+
+    let hash_bytes: i32 = mysql_wrap.db_row_string(res_handle, 0, 3, 0)
+    var i3: i32 = 0
+    while i3 < hash_bytes {
+        hash_buf[i3 as usize] = mysql_wrap.db_read_buffer(i3)
+        i3 = i3 + 1
+    }
+    out_lengths[2] = hash_bytes
+
+    let admin_flag: i32 = mysql_wrap.db_row_i32(res_handle, 0, 4)
+    out_is_admin[0] = admin_flag
+
+    mysql_wrap.db_free_result(res_handle)
+    out_uid[0] = uid
+    return true
+}
+
+// Find a user by id. Returns true on success, false on failure (NotFound or DbError).
+pub fn db_find_user_by_id(conn: i32, user_id: u64, uname_buf: MutSpan<u8>, email_buf: MutSpan<u8>, hash_buf: MutSpan<u8>, out_is_admin: MutSpan<i32>, out_lengths: MutSpan<i32>, out_uid: MutSpan<u64>) -> Bool {
+    let res_handle: i32 = mysql_wrap.db_query_user_by_id(conn, user_id)
+    if res_handle < 0 {
+        return false
+    }
+    let row_count: i64 = mysql_wrap.db_result_row_count(res_handle)
+    if row_count == 0 {
+        mysql_wrap.db_free_result(res_handle)
+        return false
+    }
+    let uid: u64 = mysql_wrap.db_row_u64(res_handle, 0, 0)
+
+    let uname_bytes: i32 = mysql_wrap.db_row_string(res_handle, 0, 1, 0)
+    var i1: i32 = 0
+    while i1 < uname_bytes {
+        uname_buf[i1 as usize] = mysql_wrap.db_read_buffer(i1)
+        i1 = i1 + 1
+    }
+    out_lengths[0] = uname_bytes
+
+    let email_bytes: i32 = mysql_wrap.db_row_string(res_handle, 0, 2, 0)
+    var i2: i32 = 0
+    while i2 < email_bytes {
+        email_buf[i2 as usize] = mysql_wrap.db_read_buffer(i2)
+        i2 = i2 + 1
+    }
+    out_lengths[1] = email_bytes
+
+    let hash_bytes: i32 = mysql_wrap.db_row_string(res_handle, 0, 3, 0)
+    var i3: i32 = 0
+    while i3 < hash_bytes {
+        hash_buf[i3 as usize] = mysql_wrap.db_read_buffer(i3)
+        i3 = i3 + 1
+    }
+    out_lengths[2] = hash_bytes
+
+    let admin_flag: i32 = mysql_wrap.db_row_i32(res_handle, 0, 4)
+    out_is_admin[0] = admin_flag
+
+    mysql_wrap.db_free_result(res_handle)
+    out_uid[0] = uid
+    return true
+}
+
+// Insert a new user. Returns true on success, false on failure (UserExists or DbError).
+pub fn db_insert_user(conn: i32, username: String, email: String, password_hash: String, is_admin: Bool, out_new_id: MutSpan<u64>) -> Bool {
+    let _u: i32 = write_db_string(0, username)
+    let _e: i32 = write_db_string(256, email)
+    let count: i32 = mysql_wrap.db_count_users_by_username_or_email(conn, 0, 256)
+    if count < 0 {
+        return false
+    }
+    if count > 0 {
+        return false
+    }
+    var is_admin_flag: i32 = 0
+    if is_admin {
+        is_admin_flag = 1
+    }
+    let _h: i32 = write_db_string(1024, password_hash)
+    let _u2: i32 = write_db_string(0, username)
+    let _e2: i32 = write_db_string(256, email)
+    let new_id: u64 = mysql_wrap.db_insert_user(conn, 0, 256, 1024, is_admin_flag)
+    if new_id == 0 {
+        return false
+    }
+    out_new_id[0] = new_id
+    return true
+}
+
+// Return all users as a JSON array string. Returns true on success, false on failure (DbError).
+pub fn db_list_users_json(conn: i32, dest_buf: MutSpan<u8>, out_len: MutSpan<i32>) -> Bool {
+    let json_len: i32 = mysql_wrap.db_list_users_json(conn, 0)
+    if json_len == 0 {
+        return false
+    }
+    var i: i32 = 0
+    while i < json_len {
+        dest_buf[i as usize] = mysql_wrap.db_read_buffer(i)
+        i = i + 1
+    }
+    out_len[0] = json_len
+    return true
+}
+
+// Delete user by id. Returns true on success, false if not found or DB error.
+pub fn db_delete_user(conn: i32, user_id: u64) -> Bool {
+    let affected: i32 = mysql_wrap.db_delete_user(conn, user_id)
+    return affected > 0
+}
+
+test "db symbols" {
+    expect true
+}

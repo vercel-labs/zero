@@ -1,0 +1,75 @@
+// cmd_remove.0 — `0pm remove <name>` — remove a dependency
+
+use std.mem
+use std.fs
+use std.args
+use std.io
+
+use jsonwalk
+use manifest
+use lockfile
+use output
+
+// Appends output to `out` and returns its length.
+pub fn runRemove(out: MutSpan<u8>) -> usize {
+    let fs: Fs = std.fs.host()
+
+    let name_arg: Maybe<String> = std.args.get(2)
+    if !name_arg.has {
+        return outError(out, 0, "usage: 0pm remove <name>")
+    }
+    let name: Span<u8> = std.mem.span(name_arg.value)
+
+    var manifest_buf: [4096]u8 = [0_u8; 4096]
+    let mlen: usize = readManifestRaw(fs, "zero.json", manifest_buf)
+    if mlen == 0 {
+        return outError(out, 0, "zero.json not found")
+    }
+    let manifest_bytes: Span<u8> = manifest_buf[..mlen]
+
+    var deps_buf: [2048]u8 = [0_u8; 2048]
+    let dlen: usize = manifestDepsRaw(manifest_bytes, deps_buf)
+    let dep_total: usize = countObjEntries(deps_buf[..dlen])
+    if findDepIndex(deps_buf[..dlen], name) == dep_total {
+        return outError(out, 0, "package not found in dependencies")
+    }
+
+    var new_deps: [2048]u8 = [0_u8; 2048]
+    let ndlen: usize = buildDepsWithRemoved(deps_buf[..dlen], name, new_deps)
+    if ndlen == 0 {
+        return outError(out, 0, "failed to remove dependency")
+    }
+
+    var pkg_name_buf: [64]u8 = [0_u8; 64]
+    let pnlen: usize = manifestPkgName(manifest_bytes, pkg_name_buf)
+    var pkg_ver_buf: [32]u8 = [0_u8; 32]
+    let pvlen: usize = manifestPkgVersion(manifest_bytes, pkg_ver_buf)
+    var targets_buf: [512]u8 = [0_u8; 512]
+    let tlen: usize = manifestTargetsRaw(manifest_bytes, targets_buf)
+
+    if !writeManifestZeroJson(pkg_name_buf[..pnlen], pkg_ver_buf[..pvlen], targets_buf[..tlen], new_deps[..ndlen]) {
+        return outError(out, 0, "failed to write zero.json")
+    }
+
+    // Remove from lockfile if present
+    var lk_buf: [4096]u8 = [0_u8; 4096]
+    let lk_len: usize = readLockPackages(fs, ".zero/zero.lock.json", lk_buf)
+    if lk_len > 0 {
+        var lk_new: [4096]u8 = [0_u8; 4096]
+        let new_len: usize = lockRemove(lk_buf[..lk_len], name, lk_new)
+        if new_len > 0 {
+            let lock_ok: Bool = writeLockFile(fs, ".zero/zero.lock.json", lk_new[..new_len])
+            if !lock_ok {
+                return outError(out, 0, "failed to update lockfile")
+            }
+        }
+    }
+
+    var msg_buf: [80]u8 = [0_u8; 80]
+    var mc: usize = 0
+    let m1: Maybe<usize> = std.io.writeSpan(msg_buf, mc, "removed ")
+    if m1.has { mc = m1.value }
+    let m2: Maybe<usize> = std.io.writeSpan(msg_buf, mc, name)
+    if m2.has { mc = m2.value }
+    return outLine(out, 0, std.io.written(msg_buf, mc))
+}

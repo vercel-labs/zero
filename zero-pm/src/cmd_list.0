@@ -1,0 +1,38 @@
+// cmd_list.0 — `0pm list` — list installed packages from lockfile
+
+use std.mem
+use std.fs
+
+use lockfile
+use output
+
+// Appends output to `out` and returns its length.
+pub fn runList(out: MutSpan<u8>) -> usize {
+    let fs: Fs = std.fs.host()
+
+    var lk_buf: [4096]u8 = [0_u8; 4096]
+    let lk_len: usize = readLockPackages(fs, ".zero/zero.lock.json", lk_buf)
+    if lk_len == 0 {
+        return outError(out, 0, "no lockfile found — run `0pm install` first")
+    }
+    let pkgs: Span<u8> = lk_buf[..lk_len]
+
+    let count: usize = lockCount(pkgs)
+    if count == 0 {
+        return outLine(out, 0, "no packages installed")
+    }
+
+    var cursor: usize = 0
+    var i: usize = 0
+    while i < count {
+        var name_buf: [64]u8 = [0_u8; 64]
+        let nlen: usize = lockNameAt(pkgs, i, name_buf)
+        var ver_buf: [32]u8 = [0_u8; 32]
+        let vlen: usize = lockFieldAt(pkgs, i, "version", ver_buf)
+        if nlen > 0 {
+            cursor = outPackage(out, cursor, name_buf[..nlen], ver_buf[..vlen])
+        }
+        i = i + 1
+    }
+    return cursor
+}
