@@ -18,6 +18,17 @@ export interface EvalServerCheck {
   expectedStderr?: string;
 }
 
+// A near-miss source that the case's gates MUST reject. Used by `--fixture`
+// to prove a case discriminates (rejects wrong answers), not only that the
+// golden fixture passes. `expectGate` documents which gate is expected to
+// catch it: "stdout"/"run" (run output), "pattern" (requiredSourcePatterns),
+// or "check" (compiler check).
+export interface NegativeFixture {
+  label: string;
+  source: string;
+  expectGate: "stdout" | "pattern" | "check" | "run";
+}
+
 export interface EvalCase {
   id: string;
   title: string;
@@ -33,6 +44,7 @@ export interface EvalCase {
   expectedStdout: string;
   expectedStderr?: string;
   requiredSourcePatterns: RegExp[];
+  negativeFixtures?: NegativeFixture[];
 }
 
 interface RosettaChallenge {
@@ -115,6 +127,18 @@ const baseEvalCases: EvalCase[] = [
       /world\.out\.write/,
       /hello from zero/,
     ],
+    negativeFixtures: [
+      {
+        label: "missing-trailing-newline",
+        source: [
+          "pub fn main(world: World) -> Void raises {",
+          "    check world.out.write(\"hello from zero\")",
+          "}",
+          "",
+        ].join("\n"),
+        expectGate: "stdout",
+      },
+    ],
   },
   {
     id: "fibonacci",
@@ -161,6 +185,31 @@ const baseEvalCases: EvalCase[] = [
       /World/,
       /world\.out\.write/,
       /fib sequence: 0 1 1 2 3 5 8 13 21 34 55/,
+    ],
+    negativeFixtures: [
+      {
+        // Drops the `fib(10) == 55` term from the verification guard. The run
+        // still prints the same line, so only the per-value requiredSourcePattern
+        // can catch it — proving those asserts are load-bearing.
+        label: "drops-fib10-verification",
+        source: [
+          "fn fib(n: u32) -> u32 {",
+          "    if n <= 1 {",
+          "        return n",
+          "    }",
+          "    return fib(n - 1) + fib(n - 2)",
+          "}",
+          "",
+          "pub fn main(world: World) -> Void raises {",
+          "    let ok: Bool = fib(0) == 0 && fib(1) == 1 && fib(2) == 1 && fib(3) == 2 && fib(4) == 3 && fib(5) == 5 && fib(6) == 8 && fib(7) == 13 && fib(8) == 21 && fib(9) == 34",
+          "    if ok {",
+          "        check world.out.write(\"fib sequence: 0 1 1 2 3 5 8 13 21 34 55\\n\")",
+          "    }",
+          "}",
+          "",
+        ].join("\n"),
+        expectGate: "pattern",
+      },
     ],
   },
 ];
@@ -291,6 +340,74 @@ const agentScaleEvalCases: EvalCase[] = [
       /fn\s+subtract/,
       /fn\s+multiply/,
       /usage: zero run \. -- <add\|subtract\|multiply\|help> <x> <y>/,
+    ],
+    negativeFixtures: [
+      {
+        // `multiply` returns x - y instead of x * y; help and the other
+        // commands are correct. Passes the help happy-path and every source
+        // pattern (fn multiply still exists), so only the multi-command
+        // runChecks can catch it — proving coverage isn't met by one route.
+        label: "multiply-returns-subtraction",
+        source: [
+          "fn add(x: u32, y: u32) -> u32 {",
+          "    return x + y",
+          "}",
+          "",
+          "fn subtract(x: u32, y: u32) -> u32 {",
+          "    return x - y",
+          "}",
+          "",
+          "fn multiply(x: u32, y: u32) -> u32 {",
+          "    return x - y",
+          "}",
+          "",
+          "pub fn main(world: World) -> Void raises {",
+          "    if std.cli.argEquals(1, \"help\") {",
+          `        check world.out.write(${JSON.stringify(scaleCliUsage)})`,
+          "        return",
+          "    }",
+          "    let x: Maybe<u32> = std.args.parseU32(2)",
+          "    let y: Maybe<u32> = std.args.parseU32(3)",
+          "    if !x.has || !y.has {",
+          `        check world.out.write(${JSON.stringify(scaleCliUsage)})`,
+          "        return",
+          "    }",
+          "    if std.cli.argEquals(1, \"add\") {",
+          "        let result: u32 = add(x.value, y.value)",
+          "        var out: [10]u8 = [0_u8; 10]",
+          "        let text: Maybe<Span<u8>> = std.fmt.u32(out, result)",
+          "        if text.has {",
+          "            check world.out.write(text.value)",
+          "            check world.out.write(\"\\n\")",
+          "        }",
+          "        return",
+          "    }",
+          "    if std.cli.argEquals(1, \"subtract\") {",
+          "        let result: u32 = subtract(x.value, y.value)",
+          "        var out: [10]u8 = [0_u8; 10]",
+          "        let text: Maybe<Span<u8>> = std.fmt.u32(out, result)",
+          "        if text.has {",
+          "            check world.out.write(text.value)",
+          "            check world.out.write(\"\\n\")",
+          "        }",
+          "        return",
+          "    }",
+          "    if std.cli.argEquals(1, \"multiply\") {",
+          "        let result: u32 = multiply(x.value, y.value)",
+          "        var out: [10]u8 = [0_u8; 10]",
+          "        let text: Maybe<Span<u8>> = std.fmt.u32(out, result)",
+          "        if text.has {",
+          "            check world.out.write(text.value)",
+          "            check world.out.write(\"\\n\")",
+          "        }",
+          "        return",
+          "    }",
+          `    check world.out.write(${JSON.stringify(scaleCliUsage)})`,
+          "}",
+          "",
+        ].join("\n"),
+        expectGate: "run",
+      },
     ],
   },
   {

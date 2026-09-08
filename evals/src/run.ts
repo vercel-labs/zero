@@ -380,6 +380,16 @@ async function runCase(
     evalCase,
     validationDurationMs,
   );
+  const negativeFixtureResults =
+    options.fixture && !isPackageEvalCase(evalCase)
+      ? await evaluateNegativeFixtures(evalCase, caseDir)
+      : [];
+  const negativeFixtureFailures = negativeFixtureResults
+    .filter((negativeResult) => !negativeResult.rejected)
+    .map(
+      (negativeResult) =>
+        `${negativeResult.label}: not rejected by any gate (case does not discriminate)`,
+    );
   const passed =
     agentRun.error === null &&
     check.code === 0 &&
@@ -388,10 +398,14 @@ async function runCase(
     budgetFailures.length === 0 &&
     patternFailures.length === 0 &&
     responseFormatFailures.length === 0 &&
-    agentRequirementFailures.length === 0;
+    agentRequirementFailures.length === 0 &&
+    negativeFixtureFailures.length === 0;
 
   if (!passed && !error) {
-    error = failureReason({
+    error =
+      negativeFixtureFailures.length > 0
+        ? negativeFixtureFailures.join("; ")
+        : failureReason({
       run,
       build,
       runFailures,
@@ -438,6 +452,7 @@ async function runCase(
     sourcePatternFailures: patternFailures,
     responseFormatFailures,
     agentRequirementFailures,
+    negativeFixtures: negativeFixtureResults,
     error,
   };
 
@@ -671,6 +686,53 @@ async function validateSourceLocally(
     }
   }
   return { check, build, runs, remoteSourcePath: null, sourceText: source };
+}
+
+interface NegativeFixtureResult {
+  label: string;
+  expectGate: string;
+  rejected: boolean;
+  gatesFailed: string[];
+  caughtByExpectedGate: boolean;
+}
+
+// In --fixture mode, run each negative fixture through the same local
+// validation path as the golden and assert it is REJECTED by at least one
+// gate. A negative that passes every gate means the case's gates are too weak
+// to discriminate a wrong answer (a silent non-discriminating eval).
+async function evaluateNegativeFixtures(
+  evalCase: EvalCase,
+  caseDir: string,
+): Promise<NegativeFixtureResult[]> {
+  const negatives = evalCase.negativeFixtures ?? [];
+  const results: NegativeFixtureResult[] = [];
+  for (const [index, negative] of negatives.entries()) {
+    const dir = join(caseDir, `negative-${index}`);
+    await mkdir(dir, { recursive: true });
+    const sourcePath = join(dir, "candidate.0");
+    const source = extractZeroSource(negative.source);
+    await writeFile(sourcePath, source);
+    const validation = await validateSourceLocally(evalCase, sourcePath, source);
+    const gatesFailed: string[] = [];
+    if (validation.check.code !== 0) gatesFailed.push("check");
+    if ((validation.build?.code ?? 0) !== 0) gatesFailed.push("build");
+    if (
+      sourcePatternFailures(source, evalCase.requiredSourcePatterns).length > 0
+    ) {
+      gatesFailed.push("pattern");
+    }
+    if (runResultFailures(validation.runs).length > 0) gatesFailed.push("run");
+    // "stdout" mismatches surface through the run-result comparison.
+    const expectedGate = negative.expectGate === "stdout" ? "run" : negative.expectGate;
+    results.push({
+      label: negative.label,
+      expectGate: negative.expectGate,
+      rejected: gatesFailed.length > 0,
+      gatesFailed,
+      caughtByExpectedGate: gatesFailed.includes(expectedGate),
+    });
+  }
+  return results;
 }
 
 async function validateSourceInSandbox(
